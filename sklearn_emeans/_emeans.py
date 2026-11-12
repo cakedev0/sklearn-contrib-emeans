@@ -30,6 +30,7 @@ from sklearn_emeans._kernels import (
     _labels_inertia_sparse,
     _omp_max_threads,
 )
+from sklearn_emeans._kmeans_parallel import _kmeans_parallel
 from sklearn_emeans._kmeans_plusplus import _kmeans_plusplus
 
 # The constants below are the ones of the reference implementation
@@ -230,22 +231,21 @@ class EMeans(
         The number of clusters to form as well as the number of
         centroids to generate.
 
-    init : {'random', 'k-means++'}, callable or array-like of shape \
-            (n_clusters, n_features), default='random'
+    init : {'random', 'k-means++', 'k-means||'}, callable or array-like of \
+            shape (n_clusters, n_features), default='random'
         Method for initialization:
 
         'random': choose `n_clusters` observations (rows) at random from data
         for the initial centroids.
 
-        'k-means++': selects initial cluster centroids using sampling based
-        on an empirical probability distribution of the points' contribution
-        to the overall inertia, as in :func:`sklearn.cluster.kmeans_plusplus`
-        (greedy k-means++). It makes `n_clusters` passes over the data, which
-        often takes longer than the e-means epochs themselves. It pays off on
-        data with a strong cluster structure (e.g. well-separated blobs or GPS
-        points along roads), where it reaches a lower inertia than 'random'
-        with any number of epochs. On other data, 'random' with more epochs is
-        usually as good for the same time.
+        'k-means++': greedy k-means++, as in
+        :func:`sklearn.cluster.kmeans_plusplus`. Mostly for experimenting:
+        'k-means||' gives a similar inertia much faster.
+
+        'k-means||': scalable k-means++ [2]_. A few rounds sample candidates
+        with probabilities proportional to their squared distance to the
+        candidates so far, then a weighted k-means++ on the candidates gives
+        the initial centroids. It costs about as much as 2 to 3 epochs.
 
         If an array is passed, it should be of shape (n_clusters, n_features)
         and gives the initial centers.
@@ -316,6 +316,10 @@ class EMeans(
        M. Douze and H. Jégou, "e-means: outperforming k-means (in one-tenth
        the epochs)", 2026. `arXiv:2611.09501 <https://arxiv.org/abs/2611.09501>`_
 
+    .. [2] B. Bahmani, B. Moseley, A. Vattani, R. Kumar and S. Vassilvitskii,
+       "Scalable K-Means++", Proceedings of the VLDB Endowment, 2012.
+       `arXiv:1203.6402 <https://arxiv.org/abs/1203.6402>`_
+
     Examples
     --------
     >>> from sklearn_emeans import EMeans
@@ -360,15 +364,15 @@ class EMeans(
         ):
             raise ValueError(f"n_epochs must be a float > 0, got {self.n_epochs!r}.")
         if isinstance(self.init, str):
-            if self.init not in ("random", "k-means++"):
+            if self.init not in ("random", "k-means++", "k-means||"):
                 raise ValueError(
-                    "init must be 'random', 'k-means++', a callable or an "
-                    f"array-like, got {self.init!r}."
+                    "init must be 'random', 'k-means++', 'k-means||', a callable "
+                    f"or an array-like, got {self.init!r}."
                 )
         elif not callable(self.init) and not hasattr(self.init, "__len__"):
             raise ValueError(
-                "init must be 'random', 'k-means++', a callable or an "
-                f"array-like, got {self.init!r}."
+                "init must be 'random', 'k-means++', 'k-means||', a callable "
+                f"or an array-like, got {self.init!r}."
             )
 
     def _check_centers(self, centers, X):
@@ -400,6 +404,11 @@ class EMeans(
                     n_threads=_openmp_effective_n_threads(),
                 )
             return centers
+        if isinstance(self.init, str) and self.init == "k-means||":
+            with _threadpool_controller().limit(limits=1, user_api="blas"):
+                return _kmeans_parallel(
+                    X, self.n_clusters, random_state, _openmp_effective_n_threads()
+                )
         if isinstance(self.init, str):
             # Same draw as scikit-learn's KMeans with init="random" and unit
             # sample weights.

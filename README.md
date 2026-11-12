@@ -34,12 +34,13 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 
 - `n_epochs` can be fractional: the fractional pass comes before the last
   epoch, which is always a full pass.
-- `init` is `"random"`, `"k-means++"`, an array of initial centers or a
-  callable. `"k-means++"` is the greedy k-means++ of scikit-learn, copied from
-  its main branch, where it is 20-45x faster than in scikit-learn 1.9. It
-  takes `n_clusters` passes over the data, often longer than the 5 epochs of
-  e-means, but on data with a strong cluster structure it reaches a lower
-  inertia than `"random"` with any number of epochs.
+- `init` is `"random"`, `"k-means||"`, `"k-means++"`, an array of initial
+  centers or a callable. `"k-means||"` is scalable k-means++ (Bahmani et al.,
+  [arXiv:1203.6402](https://arxiv.org/abs/1203.6402)): a few parallel
+  sampling rounds over the data, then a weighted k-means++ on the sampled
+  candidates. `"k-means++"` (greedy k-means++, copied from scikit-learn main)
+  is mostly for experimenting: `"k-means||"` gives a similar inertia much
+  faster.
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.
 - Fitted attributes: `cluster_centers_`, `labels_`, `inertia_` and

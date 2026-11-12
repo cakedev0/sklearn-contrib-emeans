@@ -15,7 +15,7 @@ py.extension_module(
 )
 
 py.install_sources(
-  ['__init__.py', '_emeans.py', '_kmeans_plusplus.py'],
+  ['__init__.py', '_emeans.py', '_kmeans_parallel.py', '_kmeans_plusplus.py'],
   subdir: 'sklearn_emeans',
 )
 

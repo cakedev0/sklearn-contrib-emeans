@@ -19,6 +19,10 @@ The `_sparse` variants take a CSR matrix. Without a sparse BLAS, the assignment
 computes the dot products row by row against the transposed centers, so that
 each nonzero x_k adds -2 x_k c[:, k] to the distances of its row with one
 contiguous loop over the centers.
+
+`_update_min_distances` and `_update_min_distances_sparse` use the same
+assignment to update the distances of the samples to their nearest center, for
+the k-means|| initialization.
 """
 
 from cython cimport floating
@@ -433,6 +437,168 @@ def _labels_inertia_sparse(
     free(centers_squared_norms)
     free(centers_squared_norms_64)
     return inertia
+
+
+def _update_min_distances(
+    const floating[:, ::1] X,        # IN
+    const floating[:, ::1] centers,  # IN
+    floating[::1] min_distances,     # INOUT
+    int[::1] labels,                 # INOUT, or None
+    int label_offset,
+    int n_threads,
+):
+    """Update the squared distances of the samples to their nearest center.
+
+    For each sample x_i, with c_j the given centers:
+        d²_i <- min(d²_i, min_j ||x_i - c_j||²)
+    If `labels` is not None, the samples whose distance decreases get the
+    label `label_offset + argmin_j ||x_i - c_j||²`. The distances use the GEMM
+    trick, clipped at 0. The result doesn't depend on the number of threads.
+    """
+    cdef:
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = X.shape[1]
+        intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t chunk_idx, start, n_rows, r, i, j
+        int *labels_ptr = NULL
+        int *chunk_labels = NULL
+        floating *centers_squared_norms
+        floating *distances = NULL
+        floating dist
+
+    if n_samples == 0 or n_clusters == 0:
+        return
+
+    if labels is not None:
+        labels_ptr = &labels[0]
+
+    n_threads = min(n_threads, n_chunks)
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+
+    with nogil:
+        for j in range(n_clusters):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+
+        with parallel(num_threads=n_threads):
+            distances = <floating*> malloc(CHUNK_SIZE * n_clusters * sizeof(floating))
+            chunk_labels = <int*> malloc(CHUNK_SIZE * sizeof(int))
+
+            for chunk_idx in prange(n_chunks, schedule='static'):
+                start = chunk_idx * CHUNK_SIZE
+                n_rows = min(CHUNK_SIZE, n_samples - start)
+                # distances = ||c||² - 2 x.c, and its argmin
+                _assign_rows(
+                    &X[start, 0],
+                    n_rows,
+                    &centers[0, 0],
+                    centers_squared_norms,
+                    n_clusters,
+                    n_features,
+                    chunk_labels,
+                    distances,
+                    NULL,
+                )
+                for r in range(n_rows):
+                    i = start + r
+                    # d² = max(||x||² + ||c||² - 2 x.c, 0)
+                    dist = (_squared_norm(&X[i, 0], n_features)
+                            + distances[r * n_clusters + chunk_labels[r]])
+                    if dist < 0:
+                        dist = 0
+                    if dist < min_distances[i]:
+                        min_distances[i] = dist
+                        if labels_ptr != NULL:
+                            labels_ptr[i] = label_offset + chunk_labels[r]
+
+            free(distances)
+            free(chunk_labels)
+
+    free(centers_squared_norms)
+
+
+def _update_min_distances_sparse(
+    X,                               # IN
+    const floating[:, ::1] centers,  # IN
+    floating[::1] min_distances,     # INOUT
+    int[::1] labels,                 # INOUT, or None
+    int label_offset,
+    int n_threads,
+):
+    """Same as `_update_min_distances`, with `X` a CSR matrix with int32 indices.
+
+    The distances are computed over the nonzeros of each row against the
+    transposed centers, as in `_labels_inertia_sparse`. The distance to the
+    nearest center is exact (no cancellation of ||x||²), clipped at 0.
+    """
+    cdef:
+        const floating[::1] X_data = X.data
+        const int[::1] X_indices = X.indices
+        const int[::1] X_indptr = X.indptr
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t i, j
+        int label
+        double dist
+        int *labels_ptr = NULL
+        floating *centers_T
+        floating *centers_squared_norms
+        double *centers_squared_norms_64
+        floating *distances = NULL
+
+    if n_samples == 0 or n_clusters == 0:
+        return
+
+    if labels is not None:
+        labels_ptr = &labels[0]
+
+    n_threads = min(n_threads, (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE)
+    centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+    centers_squared_norms_64 = <double*> malloc(n_clusters * sizeof(double))
+
+    with nogil:
+        for j in range(n_clusters):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+            centers_squared_norms_64[j] = _squared_norm_64(&centers[j, 0],
+                                                           n_features)
+
+        _transpose(&centers[0, 0], n_clusters, n_features, centers_T, n_threads)
+
+        with parallel(num_threads=n_threads):
+            distances = <floating*> malloc(n_clusters * sizeof(floating))
+
+            for i in prange(n_samples, schedule='static', chunksize=CHUNK_SIZE):
+                # Assigned here so that they are private to each thread.
+                label = 0
+                dist = 0.0
+                # label = argmin_j ||x_i - c_j||², dist = ||x_i - c_label||²
+                _assign_rows_sparse(
+                    &X_data[0],
+                    &X_indices[0],
+                    &X_indptr[0],
+                    NULL,
+                    i,
+                    1,
+                    centers_T,
+                    centers_squared_norms,
+                    centers_squared_norms_64,
+                    n_clusters,
+                    &label,
+                    distances,
+                    &dist,
+                )
+                if dist < min_distances[i]:
+                    min_distances[i] = <floating> dist
+                    if labels_ptr != NULL:
+                        labels_ptr[i] = label_offset + label
+
+            free(distances)
+
+    free(centers_T)
+    free(centers_squared_norms)
+    free(centers_squared_norms_64)
 
 
 cdef inline floating _squared_norm(

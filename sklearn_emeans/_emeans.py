@@ -245,7 +245,7 @@ class EMeans(
         'k-means||': scalable k-means++ [2]_. A few rounds sample candidates
         with probabilities proportional to their squared distance to the
         candidates so far, then a weighted k-means++ on the candidates gives
-        the initial centroids. It costs less than a 5-epoch fit.
+        the initial centroids. It costs about as much as 2 to 3 epochs.
 
         If an array is passed, it should be of shape (n_clusters, n_features)
         and gives the initial centers.

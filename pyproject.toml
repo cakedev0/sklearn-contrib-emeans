@@ -3,10 +3,10 @@ build-backend = "mesonpy"
 requires = [
     "meson-python>=0.16",
     "meson>=1.1.0",
-    "Cython>=3.0.10",
+    "Cython>=3.1.2",
     # Only for the cython_blas .pxd: the BLAS functions are loaded from the
     # installed SciPy at runtime, so there is no ABI constraint.
-    "scipy>=1.9",
+    "scipy>=1.11.4",
 ]
 
 [project]
@@ -16,13 +16,14 @@ description = "E-means clustering (k-means in a few epochs), compatible with sci
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+# Same minimum versions as scikit-learn 1.10.
 dependencies = [
-    "joblib>=1.2",
-    "numpy>=1.23",
-    "scipy>=1.9",
+    "joblib>=1.4.0",
+    "numpy>=1.26.0",
+    "scipy>=1.11.4",
     "scikit-learn>=1.6",
-    "threadpoolctl>=3.1",
+    "threadpoolctl>=3.5.0",
 ]
 classifiers = [
     "Intended Audience :: Science/Research",
@@ -61,7 +62,7 @@ select = ["E", "F", "W", "I", "UP"]
 max-line-length = 88
 
 [tool.cibuildwheel]
-build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+build = "cp312-* cp313-* cp314-*"
 skip = "*-musllinux_* *-win32 *-manylinux_i686"
 before-all = "bash {project}/build_tools/append_bundled_licenses.sh {project}"
 test-requires = ["pytest"]

@@ -1,0 +1,79 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install pre-commit
+      - run: pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.min-deps && ', minimum dependencies' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+            min-deps: true
+          - os: ubuntu-latest
+            python: "3.14"
+            sklearn-nightly: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Enable OpenMP with Apple Clang
+        if: runner.os == 'macOS'
+        run: |
+          brew install libomp
+          PREFIX="$(brew --prefix libomp)"
+          echo "CPPFLAGS=-Xpreprocessor -fopenmp" >> "$GITHUB_ENV"
+          echo "CFLAGS=-I$PREFIX/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-Wl,-rpath,$PREFIX/lib -L$PREFIX/lib -lomp" >> "$GITHUB_ENV"
+
+      - name: Install the minimum dependencies
+        if: matrix.min-deps
+        run: pip install numpy==1.23.2 scipy==1.9.3 scikit-learn==1.6.0 threadpoolctl==3.1.0
+
+      - name: Install the scikit-learn nightly
+        if: matrix.sklearn-nightly
+        run: pip install --pre --extra-index-url https://pypi.anaconda.org/scientific-python-nightly-wheels/simple scikit-learn
+
+      - name: Install
+        run: pip install -v ".[test]"
+
+      - name: Check that OpenMP is enabled
+        shell: python
+        working-directory: ${{ runner.temp }}
+        run: |
+          from threadpoolctl import threadpool_info
+          import sklearn_emeans._kernels as k
+          print(k._omp_max_threads(), threadpool_info())
+          assert k._omp_max_threads() > 1
+
+      - name: Test
+        working-directory: ${{ runner.temp }}
+        run: pytest --pyargs sklearn_emeans --doctest-modules -v -p no:cacheprovider

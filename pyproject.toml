@@ -1,0 +1,67 @@
+[build-system]
+build-backend = "mesonpy"
+requires = [
+    "meson-python>=0.16",
+    "meson>=1.1.0",
+    "Cython>=3.0.10",
+    # Only for the cython_blas .pxd: the BLAS functions are loaded from the
+    # installed SciPy at runtime, so there is no ABI constraint.
+    "scipy>=1.9",
+]
+
+[project]
+name = "sklearn-contrib-emeans"
+dynamic = ["version"]
+description = "E-means clustering (k-means in a few epochs), compatible with scikit-learn."
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "joblib>=1.2",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "scikit-learn>=1.6",
+    "threadpoolctl>=3.1",
+]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Cython",
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/cakedev0/sklearn-contrib-emeans"
+Issues = "https://github.com/cakedev0/sklearn-contrib-emeans/issues"
+
+[tool.pytest.ini_options]
+addopts = "--doctest-modules"
+testpaths = ["sklearn_emeans"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.cython-lint]
+max-line-length = 88
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_* *-win32 *-manylinux_i686"
+before-all = "bash {project}/build_tools/append_bundled_licenses.sh {project}"
+test-requires = ["pytest"]
+test-command = "pytest --pyargs sklearn_emeans -q -p no:cacheprovider"
+
+[tool.cibuildwheel.windows]
+before-build = "pip install delvewheel"
+repair-wheel-command = "delvewheel repair -w {dest_dir} {wheel}"

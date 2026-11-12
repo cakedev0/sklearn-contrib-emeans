@@ -1,0 +1,78 @@
+name: Wheels
+
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: Wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # OpenMP is not available with Apple Clang. Use a libomp built for old
+      # macOS versions, as scikit-learn does, since it is vendored in the
+      # wheels.
+      - uses: mamba-org/setup-micromamba@v3
+        if: runner.os == 'macOS'
+        with:
+          environment-name: openmp
+          create-args: llvm-openmp=11.1.0
+          init-shell: none
+      - name: Enable OpenMP with Apple Clang
+        if: runner.os == 'macOS'
+        run: |
+          PREFIX="$MAMBA_ROOT_PREFIX/envs/openmp"
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+          else
+            echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
+          fi
+          echo "CC=/usr/bin/clang" >> "$GITHUB_ENV"
+          echo "CPPFLAGS=-Xpreprocessor -fopenmp" >> "$GITHUB_ENV"
+          echo "CFLAGS=-I$PREFIX/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-Wl,-rpath,$PREFIX/lib -L$PREFIX/lib -lomp" >> "$GITHUB_ENV"
+
+      - uses: pypa/cibuildwheel@v4.3.5
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    # Needs a trusted publisher on PyPI for this repository, workflow and the
+    # "pypi" environment.
+    if: github.event_name == 'release'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@v1.14.3

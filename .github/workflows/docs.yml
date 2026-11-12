@@ -1,0 +1,63 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: pip install -v ".[docs]"
+
+      # sphinx-build, unlike python -m sphinx, doesn't put the working
+      # directory in sys.path: the installed package is documented, not the
+      # sources, which lack the compiled kernels.
+      - name: Build the documentation
+        run: sphinx-build -W --keep-going -b html doc doc/_build/html
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: documentation
+          path: doc/_build/html
+          include-hidden-files: true
+
+  deploy:
+    # The gh-pages branch holds a single commit, the documentation of main.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: documentation
+          path: html
+
+      - name: Push to the gh-pages branch
+        working-directory: html
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Documentation of ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

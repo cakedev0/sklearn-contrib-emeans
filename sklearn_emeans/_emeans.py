@@ -440,7 +440,11 @@ class EMeans(
         with _threadpool_controller().limit(limits=1, user_api="blas"):
             for epoch, n_rows in enumerate(epochs_n_rows):
                 is_last_epoch = epoch == len(epochs_n_rows) - 1
-                permutation = random_state.permutation(n_samples)
+                # intp for the kernel: RandomState gives C longs, which are
+                # 32-bit on Windows.
+                permutation = random_state.permutation(n_samples).astype(
+                    np.intp, copy=False
+                )
                 for start in range(0, n_rows, batch_size):
                     _emeans_step(
                         X,

@@ -4,9 +4,11 @@
 
 import math
 import os
+from functools import partial
 from numbers import Integral, Real
 
 import numpy as np
+import scipy.sparse as sp
 from joblib import cpu_count
 from sklearn.base import (
     BaseEstimator,
@@ -22,7 +24,9 @@ from threadpoolctl import ThreadpoolController
 from sklearn_emeans._kernels import (
     _chunk_size,
     _emeans_step,
+    _emeans_step_sparse,
     _labels_inertia,
+    _labels_inertia_sparse,
     _omp_max_threads,
 )
 
@@ -97,8 +101,9 @@ def _openmp_effective_n_threads():
 def _labels_inertia_threadpool_limit(X, centers, n_threads):
     """Labels and inertia of X, with sequential BLAS inside the OpenMP loop."""
     labels = np.empty(X.shape[0], dtype=np.int32)
+    labels_inertia = _labels_inertia_sparse if sp.issparse(X) else _labels_inertia
     with _threadpool_controller().limit(limits=1, user_api="blas"):
-        inertia = _labels_inertia(X, centers, labels, n_threads)
+        inertia = labels_inertia(X, centers, labels, n_threads)
     return labels, inertia
 
 
@@ -215,6 +220,8 @@ class EMeans(
     by the authors, as functions of the number of samples, of clusters and of
     epochs, so that the number of epochs is the only parameter to choose.
 
+    The input can be dense or a sparse CSR matrix, in float32 or float64.
+
     Parameters
     ----------
     n_clusters : int, default=8
@@ -321,6 +328,7 @@ class EMeans(
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
+        tags.input_tags.sparse = True
         tags.transformer_tags.preserves_dtype = ["float64", "float32"]
         return tags
 
@@ -378,7 +386,7 @@ class EMeans(
                 replace=False,
                 p=weights / weights.sum(),
             )
-            return X[seeds]
+            return X[seeds].toarray() if sp.issparse(X) else X[seeds]
         if callable(self.init):
             return self._check_centers(
                 self.init(X, self.n_clusters, random_state=random_state), X
@@ -390,10 +398,11 @@ class EMeans(
 
         Parameters
         ----------
-        X : array-like of shape (n_samples, n_features)
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
             Training instances to cluster. It must be noted that the data
             will be converted to C ordering, which will cause a memory copy
-            if the given data is not C-contiguous.
+            if the given data is not C-contiguous. If a sparse matrix is
+            passed, a copy will be made if it's not in CSR format.
 
         y : Ignored
             Not used, present here for API consistency by convention.
@@ -404,7 +413,14 @@ class EMeans(
             Fitted estimator.
         """
         self._check_params()
-        X = validate_data(self, X, dtype=[np.float64, np.float32], order="C")
+        X = validate_data(
+            self,
+            X,
+            accept_sparse="csr",
+            dtype=[np.float64, np.float32],
+            order="C",
+            accept_large_sparse=False,
+        )
         n_samples, n_features = X.shape
         n_clusters = self.n_clusters
         if n_samples < n_clusters:
@@ -436,6 +452,14 @@ class EMeans(
         epoch_sums = np.zeros((n_clusters, n_features), dtype=np.float64)
         epoch_counts = np.zeros(n_clusters, dtype=np.float64)
 
+        if sp.issparse(X):
+            emeans_step = partial(
+                _emeans_step_sparse,
+                centers_T=np.empty((n_features, n_clusters), dtype=X.dtype),
+            )
+        else:
+            emeans_step = _emeans_step
+
         step = 0
         with _threadpool_controller().limit(limits=1, user_api="blas"):
             for epoch, n_rows in enumerate(epochs_n_rows):
@@ -446,7 +470,7 @@ class EMeans(
                     np.intp, copy=False
                 )
                 for start in range(0, n_rows, batch_size):
-                    _emeans_step(
+                    emeans_step(
                         X,
                         permutation[start : min(start + batch_size, n_rows)],
                         centers,
@@ -475,7 +499,13 @@ class EMeans(
 
     def _check_test_data(self, X):
         X = validate_data(
-            self, X, dtype=[np.float64, np.float32], order="C", reset=False
+            self,
+            X,
+            accept_sparse="csr",
+            dtype=[np.float64, np.float32],
+            order="C",
+            accept_large_sparse=False,
+            reset=False,
         )
         return X, self.cluster_centers_.astype(X.dtype, copy=False)
 
@@ -484,7 +514,7 @@ class EMeans(
 
         Parameters
         ----------
-        X : array-like of shape (n_samples, n_features)
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
             New data to predict.
 
         Returns
@@ -507,7 +537,7 @@ class EMeans(
 
         Parameters
         ----------
-        X : array-like of shape (n_samples, n_features)
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
             New data to transform.
 
         Returns
@@ -524,7 +554,7 @@ class EMeans(
 
         Parameters
         ----------
-        X : array-like of shape (n_samples, n_features)
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
             New data.
 
         y : Ignored

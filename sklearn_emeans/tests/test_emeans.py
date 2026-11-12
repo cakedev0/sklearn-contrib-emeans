@@ -1,5 +1,3 @@
-from functools import partial
-
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -17,8 +15,8 @@ from sklearn_emeans._emeans import (
     _revive_dead_clusters,
 )
 from sklearn_emeans._kernels import (
-    _emeans_step,
-    _emeans_step_sparse,
+    _emeans_steps,
+    _emeans_steps_sparse,
     _labels_inertia,
     _labels_inertia_sparse,
     _update_min_distances,
@@ -87,18 +85,18 @@ def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
     _reference_step(X, batch_indices, centers_ref, weight_ema_ref, 0.3, stats_ref)
 
     stats = epoch_stats() or [None, None]
-    if csr_container is None:
-        step = _emeans_step
-    else:
-        centers_T = np.empty((n_features, n_clusters), dtype=dtype)
-        step = partial(_emeans_step_sparse, centers_T=centers_T)
-    step(
+    steps = _emeans_steps if csr_container is None else _emeans_steps_sparse
+    steps(
         X,
         batch_indices,
+        batch_size,
         centers,
         weight_ema,
-        0.3,
+        np.array([0.3]),
         *stats,
+        0,
+        0,
+        None,
         2,
     )
 
@@ -117,18 +115,126 @@ def test_emeans_step_full_step_size_gives_batch_means():
     centers = X[:4].copy()
     batch_indices = np.arange(200, dtype=np.intp)
     labels = ((X[:, None] - centers) ** 2).sum(axis=2).argmin(axis=1)
-    _emeans_step(
+    _emeans_steps(
         X,
         batch_indices,
+        200,
         centers,
         np.full(4, 1e-5),
-        1.0,
+        np.array([1.0]),
         None,
+        None,
+        0,
+        0,
         None,
         1,
     )
     expected = np.array([X[labels == j].mean(axis=0) for j in range(4)])
     assert_allclose(centers, expected)
+
+
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+@pytest.mark.parametrize("n_threads", [1, 4])
+def test_emeans_steps_same_as_one_call_per_step(csr_container, n_threads):
+    # Several steps in one call, with revivals in between, give the same
+    # centers as one call per step. The last batch is smaller.
+    rng = np.random.RandomState(0)
+    n_samples, n_features, n_clusters, batch_size = 3000, 5, 11, 400
+    X = rng.normal(size=(n_samples, n_features))
+    if csr_container is not None:
+        X[X < 0] = 0
+        X = csr_container(X)
+    steps = _emeans_steps if csr_container is None else _emeans_steps_sparse
+    rows = rng.permutation(n_samples).astype(np.intp)
+    n_steps = 8
+    step_sizes = np.linspace(0.5, 0.1, n_steps)
+    first_step, revival_period = 4, 3
+
+    def fit(one_call):
+        centers = rng_centers.copy()
+        weight_ema = np.full(n_clusters, 0.5)
+        revived_at = []
+
+        def revive():
+            # Stands for the revival: changes the centers and the weights.
+            revived_at.append(centers[0, 0])
+            centers[len(revived_at) % n_clusters] += 0.25
+            weight_ema[0] *= 2
+
+        if one_call:
+            steps(
+                X,
+                rows,
+                batch_size,
+                centers,
+                weight_ema,
+                step_sizes,
+                None,
+                None,
+                first_step,
+                revival_period,
+                revive,
+                n_threads,
+            )
+        else:
+            for s in range(n_steps):
+                batch = rows[s * batch_size : (s + 1) * batch_size]
+                steps(
+                    X,
+                    batch,
+                    batch_size,
+                    centers,
+                    weight_ema,
+                    step_sizes[s : s + 1],
+                    None,
+                    None,
+                    0,
+                    0,
+                    None,
+                    n_threads,
+                )
+                if (first_step + s + 1) % revival_period == 0:
+                    revive()
+        return centers, weight_ema, revived_at
+
+    rng_centers = rng.normal(size=(n_clusters, n_features))
+    centers, weight_ema, revived_at = fit(one_call=True)
+    centers_ref, weight_ema_ref, revived_at_ref = fit(one_call=False)
+
+    # Revivals after the steps 6, 9 and 12 of the fit.
+    assert len(revived_at) == 3
+    assert_array_equal(revived_at, revived_at_ref)
+    assert_array_equal(centers, centers_ref)
+    assert_array_equal(weight_ema, weight_ema_ref)
+
+
+def test_emeans_steps_propagates_revive_error():
+    rng = np.random.RandomState(0)
+    X = rng.normal(size=(500, 3))
+    centers = X[:4].copy()
+    n_calls = []
+
+    def revive():
+        n_calls.append(1)
+        raise ValueError("revival failed")
+
+    with pytest.raises(ValueError, match="revival failed"):
+        _emeans_steps(
+            X,
+            np.arange(500, dtype=np.intp),
+            50,
+            centers,
+            np.ones(4),
+            np.full(10, 0.1),
+            None,
+            None,
+            0,
+            2,
+            revive,
+            4,
+        )
+    # The steps stop at the first error.
+    assert len(n_calls) == 1
 
 
 @pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)

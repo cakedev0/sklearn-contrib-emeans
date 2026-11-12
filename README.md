@@ -48,7 +48,8 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 `labels_` and `inertia_` come from an extra assignment pass on the final
 centers, so that `fit(X).labels_` is the same as `predict(X)`.
 
-The input must be dense (float32 or float64, float32 is faster). There is no
+The input can be dense or a sparse CSR matrix (other sparse formats are
+converted to CSR), in float32 or float64 (float32 is faster). There is no
 `sample_weight` yet.
 
 ## Algorithm
@@ -67,6 +68,8 @@ centers as its `NumpyEmeans`, up to float32 rounding.
 Each step assigns a mini-batch to the nearest centers with a chunked GEMM,
 then updates the centers in parallel over centers, so the result doesn't
 depend on the number of threads.
+On sparse input, the GEMM is replaced by sparse dot products against the
+transposed centers.
 
 ## Performance
 
@@ -76,6 +79,13 @@ same or lower inertia. For example, 1M samples x 128 features with 1024
 clusters take 0.70 s against 5.2 s. See
 [cakedev0/scikit-learn#46](https://github.com/cakedev0/scikit-learn/pull/46)
 for the full benchmark, which uses the same kernel.
+
+On sparse input, with 22 threads on 22 cores of the same Xeon (one NUMA node,
+with SMT siblings), `EMeans` fits 10-40x faster than `KMeans(n_init=1)`
+(scikit-learn 1.10.dev0) on the TF-IDF of 20 newsgroups and on RCV1 (float32,
+20 or 100 clusters), with an inertia within 0.2%. For example, RCV1 (804k
+samples x 47k features, density 0.16%) with 100 clusters takes 1.2 s against
+48 s. See [#3](https://github.com/cakedev0/sklearn-contrib-emeans/pull/3).
 
 The best batch size depends on the dataset: on some datasets, batches 4x
 smaller or larger than the scaling law's give a lower inertia for the same

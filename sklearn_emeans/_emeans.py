@@ -232,9 +232,12 @@ class EMeans(
         'k-means++': selects initial cluster centroids using sampling based
         on an empirical probability distribution of the points' contribution
         to the overall inertia, as in :func:`sklearn.cluster.kmeans_plusplus`
-        (greedy k-means++). It gives a slightly lower inertia, but it makes
-        `n_clusters` passes over the data, which can take longer than the
-        e-means epochs themselves when `n_clusters` is large.
+        (greedy k-means++). It makes `n_clusters` passes over the data, which
+        often takes longer than the e-means epochs themselves. It pays off on
+        data with a strong cluster structure (e.g. well-separated blobs or GPS
+        points along roads), where it reaches a lower inertia than 'random'
+        with any number of epochs. On other data, 'random' with more epochs is
+        usually as good for the same time.
 
         If an array is passed, it should be of shape (n_clusters, n_features)
         and gives the initial centers.

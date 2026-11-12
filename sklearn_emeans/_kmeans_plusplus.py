@@ -2,19 +2,21 @@
 
 Adapted from `sklearn/cluster/_kmeans.py` of scikit-learn (BSD-3-Clause), at
 commit 6e37063f7ab7ef7a7e257b9d44bc3ec6ee1b1bcd, which has a faster k-means++
-than the released versions up to 1.9. Only the dense input is supported, and
-the caller limits BLAS to one thread instead of a decorator.
+than the released versions up to 1.9. Only the private `_kmeans_plusplus` is
+kept, and the caller limits BLAS to one thread instead of a decorator.
 """
 
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
+import scipy.sparse as sp
 
 from sklearn_emeans._kmeans_plusplus_kernels import (
     CHUNK_SIZE,
     _kmeans_plusplus_sample_candidates,
     _kmeans_plusplus_trials_dense,
+    _kmeans_plusplus_trials_sparse,
 )
 
 
@@ -50,20 +52,21 @@ def _kmeans_plusplus(
 
     Parameters
     ----------
-    X : ndarray of shape (n_samples, n_features), dtype=floating
-        The data to pick seeds for. It must be C-contiguous.
+    X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+        The data to pick seeds for.
 
     n_clusters : int
         The number of seeds to choose.
 
-    x_squared_norms : ndarray of shape (n_samples,), dtype=X.dtype
-        Squared Euclidean norm of each data point.
-
-    sample_weight : ndarray of shape (n_samples,), dtype=X.dtype
+    sample_weight : ndarray of shape (n_samples,)
         The weights for each observation in `X`.
+
+    x_squared_norms : ndarray of shape (n_samples,)
+        Squared Euclidean norm of each data point.
 
     random_state : RandomState instance
         The generator used to initialize the centers.
+        See :term:`Glossary <random_state>`.
 
     n_local_trials : int, default=None
         The number of seeding trials for each center (except the first),
@@ -72,7 +75,9 @@ def _kmeans_plusplus(
         on the number of seeds (2+log(k)); this is the default.
 
     n_threads : int, default=1
-        The maximum number of OpenMP threads to use.
+        The maximum number of OpenMP threads to use. It must be computed by the
+        caller: with OpenBLAS's OpenMP threading layer, the BLAS limit of this
+        function also sets the default number of OpenMP threads to 1.
 
     Returns
     -------
@@ -87,7 +92,7 @@ def _kmeans_plusplus(
     n_chunks = int(np.ceil(n_samples / CHUNK_SIZE))
     # Each k-means++ step is a parallel region with little work for small
     # datasets, where starting and synchronizing many threads would dominate:
-    # use at most one thread per 2**16 elements of X.
+    # use at most one thread per 2**16 elements of X (or non-zero values).
     n_threads = min(n_threads, max(1, X.size // 2**16))
 
     # Set the number of local seeding trials if none is given
@@ -117,6 +122,12 @@ def _kmeans_plusplus(
     # inside the half written at the previous iteration.
     # This spares memory copies at the cost of a slightly larger memory usage.
 
+    # The sparse kernel reads the columns of X: convert it once for all the steps
+    X_csc = None
+    if sp.issparse(X):
+        X_csc = X.tocsc()
+        X_csc.sort_indices()
+
     # Pick first center randomly and track index of point
     first_center_idx = random_state.choice(
         n_samples, p=sample_weight / sample_weight.sum()
@@ -137,6 +148,7 @@ def _kmeans_plusplus(
     trials_dist_sq[1, 0] = np.inf
     _kmeans_plusplus_trials(
         X,
+        X_csc,
         x_squared_norms,
         sample_weight,
         candidate_indices=np.array([first_center_idx], dtype=np.intp),
@@ -185,6 +197,7 @@ def _kmeans_plusplus(
         #   )
         _kmeans_plusplus_trials(
             X,
+            X_csc,
             x_squared_norms,
             sample_weight,
             candidate_indices,
@@ -202,6 +215,8 @@ def _kmeans_plusplus(
         center_indices[c] = candidate_indices[best_trial_idx]
 
     centers = X[center_indices]
+    if sp.issparse(X):
+        centers = centers.toarray()
 
     return centers, center_indices
 
@@ -209,6 +224,7 @@ def _kmeans_plusplus(
 # fmt: off
 def _kmeans_plusplus_trials(
     X,                          # IN (n_samples, n_features)
+    X_csc,                      # IN (n_samples, n_features) or None
     x_squared_norms,            # IN (n_samples,)
     sample_weight,              # IN (n_samples,)
     candidate_indices,          # IN (n_trials,)
@@ -218,17 +234,35 @@ def _kmeans_plusplus_trials(
     n_threads,
 ):
     # fmt: on
-    """Evaluate k-means++ candidate centers, see `_kmeans_plusplus_trials_dense`."""
+    """Evaluate k-means++ candidate centers, see `_kmeans_plusplus_trials_dense`.
+
+    `X_csc` is X in CSC format if X is sparse, None otherwise.
+    """
     candidates = X[candidate_indices]
     candidates_squared_norms = x_squared_norms[candidate_indices]
-    _kmeans_plusplus_trials_dense(
-        X,
-        x_squared_norms,
-        sample_weight,
-        candidates,
-        candidates_squared_norms,
-        closest_dist_sq,
-        trials_dist_sq,
-        trials_chunk_potentials,
-        n_threads,
-    )
+    if sp.issparse(X):
+        _kmeans_plusplus_trials_sparse(
+            X,
+            X_csc,
+            x_squared_norms,
+            sample_weight,
+            candidate_indices,
+            candidates.toarray(),
+            candidates_squared_norms,
+            closest_dist_sq,
+            trials_dist_sq,
+            trials_chunk_potentials,
+            n_threads,
+        )
+    else:
+        _kmeans_plusplus_trials_dense(
+            X,
+            x_squared_norms,
+            sample_weight,
+            candidates,
+            candidates_squared_norms,
+            closest_dist_sq,
+            trials_dist_sq,
+            trials_chunk_potentials,
+            n_threads,
+        )

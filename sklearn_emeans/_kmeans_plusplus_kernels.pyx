@@ -5,8 +5,8 @@
 
 Adapted from `sklearn/cluster/_k_means_common.pyx` and
 `sklearn/utils/_cython_blas.pyx` of scikit-learn (BSD-3-Clause), at commit
-6e37063f7ab7ef7a7e257b9d44bc3ec6ee1b1bcd. Only the dense k-means++ kernels are
-kept, and `_gemm` calls `scipy.linalg.cython_blas` directly.
+6e37063f7ab7ef7a7e257b9d44bc3ec6ee1b1bcd. Only the k-means++ kernels are kept,
+and `_gemm` calls `scipy.linalg.cython_blas` directly.
 """
 
 # Authors: The scikit-learn developers
@@ -14,8 +14,9 @@ kept, and `_gemm` calls `scipy.linalg.cython_blas` directly.
 
 import numpy as np
 from cython cimport floating
-from cython.parallel cimport prange
+from cython.parallel cimport parallel, prange
 from libc.math cimport sqrt
+from libc.stdlib cimport calloc, free
 from scipy.linalg.cython_blas cimport sgemm, dgemm
 
 ctypedef Py_ssize_t intp_t
@@ -202,6 +203,138 @@ def _kmeans_plusplus_trials_dense(
                     trials_dist_sq[trial_idx, sample_idx] = dist_sq
                     potential = potential + sample_weight[sample_idx] * dist_sq
                 trials_chunk_potentials[trial_idx, chunk_idx] = potential
+
+
+cdef inline int _lower_bound(
+        const int[::1] a, int lo, int hi, int value) noexcept nogil:
+    """First index of the sorted a[lo:hi] whose value is >= value, or hi."""
+    cdef int mid
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if a[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _kmeans_plusplus_trials_sparse(
+        X,                                              # IN (n_samples, n_features)
+        X_csc,                                          # IN (n_samples, n_features)
+        const floating[::1] x_squared_norms,            # IN (n_samples,)
+        const floating[::1] sample_weight,              # IN (n_samples,)
+        const intp_t[::1] candidate_indices,            # IN (n_trials,)
+        const floating[:, ::1] candidates,              # IN (n_trials, n_features)
+        const floating[::1] candidates_squared_norms,   # IN (n_trials,)
+        const floating[::1] closest_dist_sq,            # IN (n_samples,)
+        floating[:, ::1] trials_dist_sq,                # OUT (n_trials, n_samples)
+        double[:, ::1] trials_chunk_potentials,         # OUT (n_trials, n_chunks)
+        int n_threads):
+    """Evaluate k-means++ candidate centers for sparse input data.
+
+    `X` is in CSR format and `X_csc` is the same matrix in CSC format, with
+    sorted row indices. `candidates` are the rows `candidate_indices` of `X`, as a
+    dense array.
+
+    Same outputs, chunks and parallel split as `_kmeans_plusplus_trials_dense`
+    (see it for details). Only the computation of the distances differs:
+    `-2 candidates @ X.T` doesn't use BLAS, it reads the CSC columns of the
+    non-zeros of each candidate. And the small distances are recomputed from a
+    dense copy of the sample.
+    """
+    cdef:
+        const floating[::1] X_data = X.data
+        const int[::1] X_indices = X.indices
+        const int[::1] X_indptr = X.indptr
+        const floating[::1] Xc_data = X_csc.data
+        const int[::1] Xc_indices = X_csc.indices
+        const int[::1] Xc_indptr = X_csc.indptr
+
+        int n_samples = X.shape[0]
+        int n_features = X.shape[1]
+        int n_trials = candidates.shape[0]
+        int n_chunks = trials_chunk_potentials.shape[1]
+        int chunk_size = CHUNK_SIZE
+        int n_blocks = min(n_threads, n_chunks)
+        int block_idx, first_chunk, last_chunk, chunk_idx, start, end
+        int trial_idx, sample_idx, k
+        int p, q, q_end, col
+        intp_t candidate_idx
+        floating dist_sq, norms, minus_2_c_k
+        floating threshold = _recompute_threshold(<floating> 0)
+        double potential
+        # Dense copy of a sample, for the direct computation of small distances
+        floating *x_dense
+
+    with nogil, parallel(num_threads=n_blocks):
+        x_dense = <floating*> calloc(n_features, sizeof(floating))
+
+        for block_idx in prange(n_blocks, schedule='static'):
+            # Samples X[start:end] of the chunks first_chunk to last_chunk - 1
+            first_chunk = block_idx * n_chunks // n_blocks
+            last_chunk = (block_idx + 1) * n_chunks // n_blocks
+            start = first_chunk * chunk_size
+            end = min(last_chunk * chunk_size, n_samples)
+
+            # trials_dist_sq[:, start:end] = -2 candidates @ X[start:end].T. The
+            # candidates are rows of X, so they are sparse too: only the columns
+            # of their non-zeros are read, which is much less work than a pass
+            # over all the non-zeros of X[start:end] per candidate.
+            for trial_idx in range(n_trials):
+                for sample_idx in range(start, end):
+                    trials_dist_sq[trial_idx, sample_idx] = 0.0
+                candidate_idx = candidate_indices[trial_idx]
+                for p in range(X_indptr[candidate_idx], X_indptr[candidate_idx + 1]):
+                    # trials_dist_sq[trial_idx, start:end] += (
+                    #     -2 c_k * X[start:end, col])
+                    col = X_indices[p]
+                    minus_2_c_k = -2 * X_data[p]
+                    q_end = Xc_indptr[col + 1]
+                    q = _lower_bound(Xc_indices, Xc_indptr[col], q_end, start)
+                    while q < q_end and Xc_indices[q] < end:
+                        sample_idx = Xc_indices[q]
+                        trials_dist_sq[trial_idx, sample_idx] = (
+                            trials_dist_sq[trial_idx, sample_idx]
+                            + minus_2_c_k * Xc_data[q])
+                        q = q + 1
+
+            for chunk_idx in range(first_chunk, last_chunk):
+                start = chunk_idx * chunk_size
+                end = min(start + chunk_size, n_samples)
+                for trial_idx in range(n_trials):
+                    # potential = (
+                    #     sample_weight * trials_dist_sq[trial_idx]
+                    # )[start:end].sum()
+                    potential = 0.0
+                    for sample_idx in range(start, end):
+                        # dist_sq = ||x||² - 2 x.c + ||c||²
+                        norms = (x_squared_norms[sample_idx]
+                                 + candidates_squared_norms[trial_idx])
+                        dist_sq = trials_dist_sq[trial_idx, sample_idx] + norms
+                        if dist_sq < threshold * norms:
+                            # Small squared distances computed this way can be
+                            # inaccurate because of catastrophic cancellation:
+                            # recompute these with the numerically safer but
+                            # slower sum of squared differences with
+                            # x_dense = X[sample_idx].toarray()
+                            for k in range(X_indptr[sample_idx],
+                                           X_indptr[sample_idx + 1]):
+                                x_dense[X_indices[k]] = X_data[k]
+                            dist_sq = _euclidean_dense_dense(
+                                x_dense, &candidates[trial_idx, 0], n_features, True)
+                            # Reset x_dense to zeros for the next sample
+                            for k in range(X_indptr[sample_idx],
+                                           X_indptr[sample_idx + 1]):
+                                x_dense[X_indices[k]] = 0.0
+                        # trials_dist_sq[trial_idx, sample_idx] = min(
+                        #     closest_dist_sq[sample_idx], dist_sq)
+                        if closest_dist_sq[sample_idx] < dist_sq:
+                            dist_sq = closest_dist_sq[sample_idx]
+                        trials_dist_sq[trial_idx, sample_idx] = dist_sq
+                        potential = potential + sample_weight[sample_idx] * dist_sq
+                    trials_chunk_potentials[trial_idx, chunk_idx] = potential
+
+        free(x_dense)
 
 
 def _kmeans_plusplus_sample_candidates(

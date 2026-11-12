@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+import scipy.sparse as sp
 import sklearn
 from numpy.testing import assert_array_equal
 from sklearn.cluster import kmeans_plusplus
@@ -21,6 +22,8 @@ from sklearn_emeans._kmeans_plusplus_kernels import (
 SKLEARN_HAS_SAME_KMEANS_PLUSPLUS = tuple(
     int(part) for part in sklearn.__version__.split(".")[:2]
 ) >= (1, 10)
+
+CSR_CONTAINERS = [sp.csr_matrix, sp.csr_array]
 
 
 def _kmeans_plusplus_indices(X, n_clusters, sample_weight=None, random_state=0):
@@ -51,6 +54,37 @@ def test_kmeans_plusplus_matches_sklearn(dtype, weighted):
     indices = _kmeans_plusplus_indices(X, 30, sample_weight)
     _, expected = kmeans_plusplus(X, 30, sample_weight=sample_weight, random_state=0)
     assert_array_equal(indices, expected)
+
+
+@pytest.mark.skipif(
+    not SKLEARN_HAS_SAME_KMEANS_PLUSPLUS, reason="needs scikit-learn >= 1.10"
+)
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_kmeans_plusplus_matches_sklearn_sparse(csr_container, dtype):
+    X, _ = make_blobs(n_samples=5000, n_features=10, centers=30, random_state=0)
+    X[X < 0] = 0
+    X = csr_container(X.astype(dtype))
+
+    indices = _kmeans_plusplus_indices(X, 30)
+    _, expected = kmeans_plusplus(X, 30, random_state=0)
+    assert_array_equal(indices, expected)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_kmeans_plusplus_dense_sparse(csr_container):
+    # Dense and sparse inputs give the same centers. Enough samples for several
+    # chunks and threads, and many zeros so that the sparse kernel skips most of
+    # the values. Only in float64: in float32, the two kernels can break near
+    # ties differently.
+    rng = np.random.RandomState(0)
+    X, _ = make_blobs(n_samples=20_000, n_features=10, centers=20, random_state=0)
+    X[rng.uniform(size=X.shape) < 0.8] = 0
+    sample_weight = rng.uniform(size=20_000)
+
+    indices_dense = _kmeans_plusplus_indices(X, 20, sample_weight)
+    indices_sparse = _kmeans_plusplus_indices(csr_container(X), 20, sample_weight)
+    assert_array_equal(indices_dense, indices_sparse)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -104,22 +138,25 @@ def test_kmeans_plusplus_n_clusters_equal_n_samples(dtype):
     assert_array_equal(np.sort(indices), np.arange(300))
 
 
+@pytest.mark.parametrize("array_constr", [np.asarray] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_kmeans_plusplus_duplicates_far_from_origin(dtype):
+def test_kmeans_plusplus_duplicates_far_from_origin(array_constr, dtype):
     # A sample identical to a chosen center is never chosen again, even far from
     # the origin, where ||x||² - 2 x.c + ||c||² is dominated by rounding errors
     # in float32.
     rng = np.random.RandomState(0)
     X = np.repeat(rng.uniform(size=(10, 2)) + 1e3, 50, axis=0).astype(dtype)
-    indices = _kmeans_plusplus_indices(X, 10)
+    indices = _kmeans_plusplus_indices(array_constr(X), 10)
     assert np.unique(X[indices], axis=0).shape[0] == 10
 
 
+@pytest.mark.parametrize("array_constr", [np.asarray] + CSR_CONTAINERS)
 @pytest.mark.parametrize("shape", [(30_000, 10), (600, 2_000)])
-def test_kmeans_plusplus_does_not_depend_on_n_threads(shape):
+def test_kmeans_plusplus_does_not_depend_on_n_threads(array_constr, shape):
     X, _ = make_blobs(
         n_samples=shape[0], n_features=shape[1], centers=10, random_state=0
     )
+    X = array_constr(X)
     args = (
         X,
         10,
@@ -187,12 +224,16 @@ def test_kmeans_plusplus_sample_candidates_rounding():
     assert_array_equal(candidate_indices, [3, CHUNK_SIZE - 4])
 
 
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_emeans_kmeans_plusplus_init(dtype):
+def test_emeans_kmeans_plusplus_init(csr_container, dtype):
     # init="k-means++" gives the same result as the vendored k-means++ passed as
     # a callable, so the centers come from it and the RNG is shared with the fit.
     X, _ = make_blobs(n_samples=3000, n_features=8, centers=20, random_state=0)
     X = X.astype(dtype)
+    if csr_container is not None:
+        X[X < 0] = 0
+        X = csr_container(X)
 
     def init(X, n_clusters, random_state):
         centers, _ = _kmeans_plusplus(

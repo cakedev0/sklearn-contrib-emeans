@@ -499,14 +499,19 @@ def test_kmeans_parallel_sparse_matches_dense(dtype, csr_container):
     )
     centers = _kmeans_parallel(X, 30, np.random.RandomState(0), 2)
     centers_csr = _kmeans_parallel(X_csr, 30, np.random.RandomState(0), 2)
+    # The sparse distances round differently than the GEMM: a near tie can
+    # change a label or a sampled candidate.
     if dtype == np.float64:
         assert_array_equal(candidates, candidates_csr)
         assert_array_equal(weights, weights_csr)
-        assert_allclose(centers, centers_csr)
     else:
-        # The sparse distances round differently than the GEMM: a near tie
-        # can change a label or a sampled candidate.
         assert len(np.intersect1d(candidates, candidates_csr)) > 0.9 * len(candidates)
-        inertia = EMeans(n_clusters=30, init=centers).fit(X).inertia_
-        inertia_csr = EMeans(n_clusters=30, init=centers_csr).fit(X).inertia_
-        assert inertia_csr == pytest.approx(inertia, rel=0.01)
+    # The k-means++ on the candidates can break an exact tie differently, in
+    # float64 too: here, two candidates of weight 50 are closer to each other
+    # than to their closest center, so adding either one gives the same
+    # potential. The rounding decides which one is picked, and it differs
+    # between the GEMM and the sparse kernel on macOS arm64. The next steps
+    # then sample other candidates.
+    inertia = EMeans(n_clusters=30, init=centers).fit(X).inertia_
+    inertia_csr = EMeans(n_clusters=30, init=centers_csr).fit(X).inertia_
+    assert inertia_csr == pytest.approx(inertia, rel=0.01)

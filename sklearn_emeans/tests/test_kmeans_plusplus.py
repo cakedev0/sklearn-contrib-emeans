@@ -6,6 +6,7 @@ import sklearn
 from numpy.testing import assert_array_equal
 from sklearn.cluster import kmeans_plusplus
 from sklearn.datasets import make_blobs
+from sklearn.utils.extmath import row_norms
 
 from sklearn_emeans import EMeans
 from sklearn_emeans._kmeans_plusplus import _kmeans_plusplus
@@ -28,7 +29,7 @@ def _kmeans_plusplus_indices(X, n_clusters, sample_weight=None, random_state=0):
     _, indices = _kmeans_plusplus(
         X,
         n_clusters,
-        np.einsum("ij,ij->i", X, X),
+        row_norms(X, squared=True),
         sample_weight.astype(X.dtype),
         np.random.RandomState(random_state),
         n_threads=4,
@@ -59,7 +60,7 @@ def test_kmeans_plusplus_output(dtype):
     centers, indices = _kmeans_plusplus(
         X,
         10,
-        np.einsum("ij,ij->i", X, X),
+        row_norms(X, squared=True),
         np.ones(1000, dtype=dtype),
         np.random.RandomState(0),
     )
@@ -122,7 +123,7 @@ def test_kmeans_plusplus_does_not_depend_on_n_threads(shape):
     args = (
         X,
         10,
-        np.einsum("ij,ij->i", X, X),
+        row_norms(X, squared=True),
         np.ones(X.shape[0]),
     )
     _, indices_sequential = _kmeans_plusplus(
@@ -197,7 +198,7 @@ def test_emeans_kmeans_plusplus_init(dtype):
         centers, _ = _kmeans_plusplus(
             X,
             n_clusters,
-            np.einsum("ij,ij->i", X, X),
+            row_norms(X, squared=True),
             np.ones(X.shape[0], dtype=X.dtype),
             random_state,
         )

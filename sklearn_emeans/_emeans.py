@@ -16,6 +16,7 @@ from sklearn.base import (
 )
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.utils import check_array, check_random_state
+from sklearn.utils.extmath import row_norms
 from sklearn.utils.validation import check_is_fitted, validate_data
 from threadpoolctl import ThreadpoolController
 
@@ -380,7 +381,7 @@ class EMeans(
     def _init_centers(self, X, random_state):
         if isinstance(self.init, str) and self.init == "k-means++":
             sample_weight = np.ones(X.shape[0], dtype=X.dtype)
-            x_squared_norms = np.einsum("ij,ij->i", X, X)
+            x_squared_norms = row_norms(X, squared=True)
             with _threadpool_controller().limit(limits=1, user_api="blas"):
                 centers, _ = _kmeans_plusplus(
                     X,

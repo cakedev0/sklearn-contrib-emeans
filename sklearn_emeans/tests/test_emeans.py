@@ -48,7 +48,7 @@ def test_emeans_step_matches_reference(dtype, accumulate):
     # A center far from the data gets no row.
     centers[0] = 100
     weight_ema = rng.uniform(size=n_clusters)
-    batch_indices = rng.permutation(n_samples)[:batch_size]
+    batch_indices = rng.permutation(n_samples)[:batch_size].astype(np.intp)
 
     def epoch_stats():
         if not accumulate:

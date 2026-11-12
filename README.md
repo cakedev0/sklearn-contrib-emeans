@@ -62,6 +62,19 @@ Each step assigns a mini-batch to the nearest centers with a chunked GEMM,
 then updates the centers in parallel over centers, so the result doesn't
 depend on the number of threads.
 
+## Performance
+
+On one socket of a Xeon 6787P with 43 threads, on float32 blobs, `EMeans`
+with the default 5 epochs fits 6-17x faster than `KMeans(n_init=1)` for the
+same or lower inertia. For example, 1M samples x 128 features with 1024
+clusters take 0.70 s against 5.2 s. See
+[cakedev0/scikit-learn#46](https://github.com/cakedev0/scikit-learn/pull/46)
+for the full benchmark, which uses the same kernel.
+
+The best batch size depends on the dataset: on some datasets, batches 4x
+smaller or larger than the scaling law's give a lower inertia for the same
+fit time. A `batch_size` parameter may come later.
+
 ## Relation to scikit-learn
 
 This package is a step towards adding `EMeans` to scikit-learn itself, see

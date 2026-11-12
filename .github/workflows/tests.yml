@@ -25,7 +25,7 @@ jobs:
       - run: pre-commit run --all-files --show-diff-on-failure
 
   test:
-    name: ${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.min-deps && ', minimum dependencies' || '' }}
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.min-deps && ', minimum dependencies' || '' }}${{ matrix.sklearn-nightly && ', scikit-learn nightly' || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

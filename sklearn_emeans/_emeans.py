@@ -18,6 +18,7 @@ from sklearn.base import (
 )
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.utils import check_array, check_random_state
+from sklearn.utils.extmath import row_norms
 from sklearn.utils.validation import check_is_fitted, validate_data
 from threadpoolctl import ThreadpoolController
 
@@ -29,6 +30,7 @@ from sklearn_emeans._kernels import (
     _labels_inertia_sparse,
     _omp_max_threads,
 )
+from sklearn_emeans._kmeans_plusplus import _kmeans_plusplus
 
 # The constants below are the ones of the reference implementation
 # (faiss/contrib/e_means/base.py), which differ slightly from the paper.
@@ -228,12 +230,22 @@ class EMeans(
         The number of clusters to form as well as the number of
         centroids to generate.
 
-    init : 'random', callable or array-like of shape (n_clusters, n_features), \
-            default='random'
+    init : {'random', 'k-means++'}, callable or array-like of shape \
+            (n_clusters, n_features), default='random'
         Method for initialization:
 
         'random': choose `n_clusters` observations (rows) at random from data
         for the initial centroids.
+
+        'k-means++': selects initial cluster centroids using sampling based
+        on an empirical probability distribution of the points' contribution
+        to the overall inertia, as in :func:`sklearn.cluster.kmeans_plusplus`
+        (greedy k-means++). It makes `n_clusters` passes over the data, which
+        often takes longer than the e-means epochs themselves. It pays off on
+        data with a strong cluster structure (e.g. well-separated blobs or GPS
+        points along roads), where it reaches a lower inertia than 'random'
+        with any number of epochs. On other data, 'random' with more epochs is
+        usually as good for the same time.
 
         If an array is passed, it should be of shape (n_clusters, n_features)
         and gives the initial centers.
@@ -348,15 +360,15 @@ class EMeans(
         ):
             raise ValueError(f"n_epochs must be a float > 0, got {self.n_epochs!r}.")
         if isinstance(self.init, str):
-            if self.init != "random":
+            if self.init not in ("random", "k-means++"):
                 raise ValueError(
-                    "init must be 'random', a callable or an array-like, got "
-                    f"{self.init!r}."
+                    "init must be 'random', 'k-means++', a callable or an "
+                    f"array-like, got {self.init!r}."
                 )
         elif not callable(self.init) and not hasattr(self.init, "__len__"):
             raise ValueError(
-                "init must be 'random', a callable or an array-like, got "
-                f"{self.init!r}."
+                "init must be 'random', 'k-means++', a callable or an "
+                f"array-like, got {self.init!r}."
             )
 
     def _check_centers(self, centers, X):
@@ -375,6 +387,19 @@ class EMeans(
         return centers
 
     def _init_centers(self, X, random_state):
+        if isinstance(self.init, str) and self.init == "k-means++":
+            sample_weight = np.ones(X.shape[0], dtype=X.dtype)
+            x_squared_norms = row_norms(X, squared=True)
+            with _threadpool_controller().limit(limits=1, user_api="blas"):
+                centers, _ = _kmeans_plusplus(
+                    X,
+                    self.n_clusters,
+                    x_squared_norms,
+                    sample_weight,
+                    random_state,
+                    n_threads=_openmp_effective_n_threads(),
+                )
+            return centers
         if isinstance(self.init, str):
             # Same draw as scikit-learn's KMeans with init="random" and unit
             # sample weights.

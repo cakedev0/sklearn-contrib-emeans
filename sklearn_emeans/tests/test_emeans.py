@@ -180,9 +180,13 @@ def test_emeans_inertia_close_to_kmeans(n_features):
     assert emeans.inertia_ < 1.03 * kmeans.inertia_
 
 
-def test_emeans_recovers_blobs():
+@pytest.mark.parametrize("init", ["random", "k-means++"])
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_emeans_recovers_blobs(init, csr_container):
     X, y = make_blobs(n_samples=3000, n_features=5, centers=5, random_state=42)
-    emeans = EMeans(n_clusters=5, random_state=0).fit(X)
+    if csr_container is not None:
+        X = csr_container(X)
+    emeans = EMeans(n_clusters=5, init=init, random_state=0).fit(X)
     assert adjusted_rand_score(y, emeans.labels_) == pytest.approx(1)
 
 
@@ -341,7 +345,7 @@ def test_emeans_init_array_and_callable():
         ({"n_clusters": 0}, "n_clusters must be an int >= 1"),
         ({"n_clusters": 2.5}, "n_clusters must be an int >= 1"),
         ({"n_epochs": 0}, "n_epochs must be a float > 0"),
-        ({"init": "k-means++"}, "init must be 'random'"),
+        ({"init": "unknown"}, "init must be 'random', 'k-means\\+\\+'"),
         ({"init": np.zeros((3, 2))}, "does not match the number of clusters"),
         ({"init": np.zeros((2, 3))}, "does not match the number of features"),
     ],

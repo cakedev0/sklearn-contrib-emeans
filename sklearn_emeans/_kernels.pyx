@@ -14,6 +14,11 @@ A step on a mini-batch has two parallel phases:
 
 `_labels_inertia` assigns all the samples with the same chunked GEMM, without
 the gather.
+
+The `_sparse` variants take a CSR matrix. Without a sparse BLAS, the assignment
+computes the dot products row by row against the transposed centers, so that
+each nonzero x_k adds -2 x_k c[:, k] to the distances of its row with one
+contiguous loop over the centers.
 """
 
 from cython cimport floating
@@ -243,6 +248,193 @@ def _labels_inertia(
     return inertia
 
 
+def _emeans_step_sparse(
+    X,                                     # IN
+    const intp_t[::1] batch_indices,       # IN
+    floating[:, ::1] centers,              # INOUT
+    double[::1] weight_ema,                # INOUT
+    double step_size,
+    double[:, ::1] epoch_sums,             # INOUT, or None
+    double[::1] epoch_counts,              # INOUT, or None
+    int n_threads,
+    floating[:, ::1] centers_T,            # TMP
+):
+    """One e-means step on the CSR rows `X[batch_indices]`.
+
+    Same as `_emeans_step`, with `X` a CSR matrix with int32 indices and
+    `centers_T` a buffer of shape (n_features, n_clusters), passed by the
+    caller so that it is allocated once per fit.
+    """
+    cdef:
+        const floating[::1] X_data = X.data
+        const int[::1] X_indices = X.indices
+        const int[::1] X_indptr = X.indptr
+        intp_t n_batch = batch_indices.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t n_chunks = (n_batch + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t chunk_idx, start, j
+        double *epoch_sums_ptr = NULL
+        double *epoch_counts_ptr = NULL
+        int *labels
+        intp_t *cluster_starts
+        intp_t *batch_order
+        floating *centers_squared_norms
+        floating *distances = NULL
+        double *sums = NULL
+
+    if n_batch == 0:
+        return
+
+    if epoch_sums is not None:
+        epoch_sums_ptr = &epoch_sums[0, 0]
+        epoch_counts_ptr = &epoch_counts[0]
+
+    labels = <int*> malloc(n_batch * sizeof(int))
+    cluster_starts = <intp_t*> malloc((n_clusters + 1) * sizeof(intp_t))
+    batch_order = <intp_t*> malloc(n_batch * sizeof(intp_t))
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+
+    with nogil:
+        for j in prange(n_clusters, num_threads=n_threads, schedule='static'):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+
+        _transpose(&centers[0, 0], n_clusters, n_features, &centers_T[0, 0],
+                   n_threads)
+
+        # Phase 1: assignment, parallel over chunks of batch rows.
+        with parallel(num_threads=n_threads):
+            distances = <floating*> malloc(n_clusters * sizeof(floating))
+
+            for chunk_idx in prange(n_chunks, schedule='dynamic'):
+                start = chunk_idx * CHUNK_SIZE
+                _assign_rows_sparse(
+                    &X_data[0],
+                    &X_indices[0],
+                    &X_indptr[0],
+                    &batch_indices[start],
+                    0,
+                    min(CHUNK_SIZE, n_batch - start),
+                    &centers_T[0, 0],
+                    centers_squared_norms,
+                    NULL,
+                    n_clusters,
+                    labels + start,
+                    distances,
+                    NULL,
+                )
+
+            free(distances)
+
+        _sort_by_label(&batch_indices[0], labels, n_batch, n_clusters,
+                       cluster_starts, batch_order)
+
+        # Phase 2: EMA update, parallel over centers.
+        with parallel(num_threads=n_threads):
+            sums = <double*> malloc(n_features * sizeof(double))
+
+            for j in prange(n_clusters, schedule='guided'):
+                _update_center_sparse(
+                    &X_data[0],
+                    &X_indices[0],
+                    &X_indptr[0],
+                    batch_order + cluster_starts[j],
+                    cluster_starts[j + 1] - cluster_starts[j],
+                    n_features,
+                    &centers[j, 0],
+                    &weight_ema[j],
+                    step_size,
+                    NULL if epoch_sums_ptr == NULL
+                    else epoch_sums_ptr + j * n_features,
+                    NULL if epoch_counts_ptr == NULL else epoch_counts_ptr + j,
+                    sums,
+                )
+
+            free(sums)
+
+    free(labels)
+    free(cluster_starts)
+    free(batch_order)
+    free(centers_squared_norms)
+
+
+def _labels_inertia_sparse(
+    X,                               # IN
+    const floating[:, ::1] centers,  # IN
+    int[::1] labels,                 # OUT
+    int n_threads,
+):
+    """Assign each row of the CSR matrix `X` to its nearest center.
+
+    Same as `_labels_inertia`, with `X` a CSR matrix with int32 indices.
+    """
+    cdef:
+        const floating[::1] X_data = X.data
+        const int[::1] X_indices = X.indices
+        const int[::1] X_indptr = X.indptr
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t chunk_idx, start, j
+        double inertia = 0.0
+        double *chunk_inertia
+        floating *centers_T
+        floating *centers_squared_norms
+        double *centers_squared_norms_64
+        floating *distances = NULL
+
+    if n_samples == 0:
+        return 0.0
+
+    n_threads = min(n_threads, n_chunks)
+    chunk_inertia = <double*> malloc(n_chunks * sizeof(double))
+    centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+    centers_squared_norms_64 = <double*> malloc(n_clusters * sizeof(double))
+
+    with nogil:
+        for j in range(n_clusters):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+            centers_squared_norms_64[j] = _squared_norm_64(&centers[j, 0],
+                                                           n_features)
+
+        _transpose(&centers[0, 0], n_clusters, n_features, centers_T, n_threads)
+
+        with parallel(num_threads=n_threads):
+            distances = <floating*> malloc(n_clusters * sizeof(floating))
+
+            for chunk_idx in prange(n_chunks, schedule='static'):
+                start = chunk_idx * CHUNK_SIZE
+                _assign_rows_sparse(
+                    &X_data[0],
+                    &X_indices[0],
+                    &X_indptr[0],
+                    NULL,
+                    start,
+                    min(CHUNK_SIZE, n_samples - start),
+                    centers_T,
+                    centers_squared_norms,
+                    centers_squared_norms_64,
+                    n_clusters,
+                    &labels[start],
+                    distances,
+                    &chunk_inertia[chunk_idx],
+                )
+
+            free(distances)
+
+        # Sum the inertias of the chunks in a fixed order.
+        for chunk_idx in range(n_chunks):
+            inertia += chunk_inertia[chunk_idx]
+
+    free(chunk_inertia)
+    free(centers_T)
+    free(centers_squared_norms)
+    free(centers_squared_norms_64)
+    return inertia
+
+
 cdef inline floating _squared_norm(
     const floating *x,
     intp_t n_features,
@@ -253,6 +445,19 @@ cdef inline floating _squared_norm(
 
     for k in range(n_features):
         result += x[k] * x[k]
+    return result
+
+
+cdef inline double _squared_norm_64(
+    const floating *x,
+    intp_t n_features,
+) noexcept nogil:
+    cdef:
+        double result = 0.0
+        intp_t k
+
+    for k in range(n_features):
+        result += <double> x[k] * x[k]
     return result
 
 
@@ -349,6 +554,88 @@ cdef inline void _gemm_nt(
               <double*> A, &ldb, &beta, C, &ldc)
 
 
+cdef void _transpose(
+    const floating *A,  # IN (n_rows, n_cols)
+    intp_t n_rows,
+    intp_t n_cols,
+    floating *A_T,      # OUT (n_cols, n_rows)
+    int n_threads,
+) noexcept nogil:
+    """A_T = A^T, parallel over blocks of columns of A."""
+    cdef:
+        intp_t block_size = 64
+        intp_t n_blocks = (n_cols + block_size - 1) // block_size
+        intp_t b, i, k
+
+    for b in prange(n_blocks, num_threads=n_threads, schedule='static'):
+        for i in range(n_rows):
+            for k in range(b * block_size, min((b + 1) * block_size, n_cols)):
+                A_T[k * n_rows + i] = A[i * n_cols + k]
+
+
+cdef void _assign_rows_sparse(
+    const floating *X_data,                   # IN (nnz,)
+    const int *X_indices,                     # IN (nnz,)
+    const int *X_indptr,                      # IN (n_samples + 1,)
+    const intp_t *rows,                       # IN (n_rows,), or NULL
+    intp_t first_row,
+    intp_t n_rows,
+    const floating *centers_T,                # IN (n_features, n_clusters)
+    const floating *centers_squared_norms,    # IN (n_clusters,)
+    const double *centers_squared_norms_64,   # IN (n_clusters,), or NULL
+    intp_t n_clusters,
+    int *labels,                              # OUT (n_rows,)
+    floating *distances,                      # TMP (n_clusters,)
+    double *inertia,                          # OUT, or NULL
+) noexcept nogil:
+    """Assign the CSR rows `X[rows]` to their nearest center.
+
+    If `rows` is NULL, the rows are `first_row, ..., first_row + n_rows - 1`.
+    The inertia needs `centers_squared_norms_64`, the squared norms of the
+    centers in float64.
+    """
+    cdef:
+        intp_t r, i, p, j, label
+        floating minus_2x, dist, min_dist
+        const floating *c_k
+        double c, diff, squared_distance, total = 0.0
+
+    for r in range(n_rows):
+        i = first_row + r if rows == NULL else rows[r]
+
+        # distances = ||c||² - 2 x.c, with x.c = sum_k x_k c_k over the
+        # nonzeros of x
+        for j in range(n_clusters):
+            distances[j] = centers_squared_norms[j]
+        for p in range(X_indptr[i], X_indptr[i + 1]):
+            minus_2x = -2 * X_data[p]
+            c_k = &centers_T[X_indices[p] * n_clusters]
+            for j in range(n_clusters):
+                distances[j] += minus_2x * c_k[j]
+
+        min_dist = distances[0]
+        label = 0
+        for j in range(1, n_clusters):
+            dist = distances[j]
+            if dist < min_dist:
+                min_dist = dist
+                label = j
+        labels[r] = <int> label
+
+        if inertia != NULL:
+            # ||x - c||² = ||c||² + sum_k ((x_k - c_k)² - c_k²) over the
+            # nonzeros of x, without the cancellation of ||x||².
+            squared_distance = centers_squared_norms_64[label]
+            for p in range(X_indptr[i], X_indptr[i + 1]):
+                c = centers_T[X_indices[p] * n_clusters + label]
+                diff = X_data[p] - c
+                squared_distance += diff * diff - c * c
+            total += max(squared_distance, 0.0)
+
+    if inertia != NULL:
+        inertia[0] = total
+
+
 cdef void _sort_by_label(
     const intp_t *batch_indices,  # IN (n_batch,)
     const int *labels,            # IN (n_batch,)
@@ -392,7 +679,63 @@ cdef void _update_center(
     double *epoch_count,    # INOUT, or NULL
     double *sums,           # TMP (n_features,)
 ) noexcept nogil:
-    """EMA update of one center from its batch rows `X[members]`.
+    """EMA update of one center from its batch rows `X[members]`."""
+    cdef:
+        intp_t m, k
+        const floating *x
+
+    if n_members > 0:
+        # s_j = sum of the rows of center j
+        memset(sums, 0, n_features * sizeof(double))
+        for m in range(n_members):
+            x = &X[members[m] * n_features]
+            for k in range(n_features):
+                sums[k] += x[k]
+
+    _ema_update(center, weight_ema, sums, n_members, step_size, epoch_sum,
+                epoch_count, n_features)
+
+
+cdef void _update_center_sparse(
+    const floating *X_data,  # IN (nnz,)
+    const int *X_indices,    # IN (nnz,)
+    const int *X_indptr,     # IN (n_samples + 1,)
+    const intp_t *members,   # IN (n_members,)
+    intp_t n_members,
+    intp_t n_features,
+    floating *center,        # INOUT (n_features,)
+    double *weight_ema,      # INOUT
+    double step_size,
+    double *epoch_sum,       # INOUT (n_features,), or NULL
+    double *epoch_count,     # INOUT, or NULL
+    double *sums,            # TMP (n_features,)
+) noexcept nogil:
+    """EMA update of one center from its CSR batch rows `X[members]`."""
+    cdef intp_t m, i, p
+
+    if n_members > 0:
+        # s_j = sum of the rows of center j
+        memset(sums, 0, n_features * sizeof(double))
+        for m in range(n_members):
+            i = members[m]
+            for p in range(X_indptr[i], X_indptr[i + 1]):
+                sums[X_indices[p]] += X_data[p]
+
+    _ema_update(center, weight_ema, sums, n_members, step_size, epoch_sum,
+                epoch_count, n_features)
+
+
+cdef inline void _ema_update(
+    floating *center,     # INOUT (n_features,)
+    double *weight_ema,   # INOUT
+    const double *sums,   # IN (n_features,), unused if n_members == 0
+    intp_t n_members,
+    double step_size,
+    double *epoch_sum,    # INOUT (n_features,), or NULL
+    double *epoch_count,  # INOUT, or NULL
+    intp_t n_features,
+) noexcept nogil:
+    """EMA update of one center from the sum s_j of its n_j batch rows.
 
     The center c_j = S_j / N_j is the ratio of two EMAs with step alpha, of the
     sum s_j and of the number n_j of its batch rows:
@@ -402,8 +745,7 @@ cdef void _update_center(
         c_j <- ((1 - alpha) N_j c_j + alpha s_j) / N'_j
     """
     cdef:
-        intp_t m, k
-        const floating *x
+        intp_t k
         double retained = (1.0 - step_size) * weight_ema[0]
         double new_weight, center_coef, sums_coef
 
@@ -411,13 +753,6 @@ cdef void _update_center(
         # Only N_j decays, c_j stays.
         weight_ema[0] = retained
         return
-
-    # s_j = sum of the rows of center j
-    memset(sums, 0, n_features * sizeof(double))
-    for m in range(n_members):
-        x = &X[members[m] * n_features]
-        for k in range(n_features):
-            sums[k] += x[k]
 
     if epoch_sum != NULL:
         epoch_count[0] += n_members

@@ -43,7 +43,8 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 `labels_` and `inertia_` come from an extra assignment pass on the final
 centers, so that `fit(X).labels_` is the same as `predict(X)`.
 
-The input must be dense (float32 or float64, float32 is faster). There is no
+The input can be dense or a sparse CSR matrix (other sparse formats are
+converted to CSR), in float32 or float64 (float32 is faster). There is no
 `sample_weight` yet.
 
 ## Algorithm
@@ -62,6 +63,8 @@ centers as its `NumpyEmeans`, up to float32 rounding.
 Each step assigns a mini-batch to the nearest centers with a chunked GEMM,
 then updates the centers in parallel over centers, so the result doesn't
 depend on the number of threads.
+On sparse input, the GEMM is replaced by sparse dot products against the
+transposed centers.
 
 ## Performance
 

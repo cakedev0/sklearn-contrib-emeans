@@ -1,5 +1,8 @@
+from functools import partial
+
 import numpy as np
 import pytest
+import scipy.sparse as sp
 from numpy.testing import assert_allclose, assert_array_equal
 from sklearn.cluster import KMeans
 from sklearn.datasets import make_blobs
@@ -13,12 +16,21 @@ from sklearn_emeans._emeans import (
     _resolve_initial_step_size,
     _revive_dead_clusters,
 )
-from sklearn_emeans._kernels import _emeans_step, _labels_inertia
+from sklearn_emeans._kernels import (
+    _emeans_step,
+    _emeans_step_sparse,
+    _labels_inertia,
+    _labels_inertia_sparse,
+)
+
+CSR_CONTAINERS = [sp.csr_matrix, sp.csr_array]
 
 
 def _reference_step(X, batch_indices, centers, weight_ema, step_size, epoch_stats):
     """NumPy implementation of one e-means step, updating its inputs inplace."""
     X_batch = X[batch_indices]
+    if sp.issparse(X_batch):
+        X_batch = X_batch.toarray()
     distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
     labels = distances.argmin(axis=1)
 
@@ -38,12 +50,18 @@ def _reference_step(X, batch_indices, centers, weight_ema, step_size, epoch_stat
         weight_ema[j] = new_weight
 
 
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_emeans_step_matches_reference(dtype, accumulate):
+def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
     rng = np.random.RandomState(0)
     n_samples, n_features, n_clusters, batch_size = 1000, 7, 13, 600
     X = rng.normal(size=(n_samples, n_features)).astype(dtype)
+    if csr_container is not None:
+        # Sparse rows, some of them empty.
+        X[X < 0.5] = 0
+        X[:50] = 0
+        X = csr_container(X)
     centers = rng.normal(size=(n_clusters, n_features)).astype(dtype)
     # A center far from the data gets no row.
     centers[0] = 100
@@ -63,7 +81,12 @@ def test_emeans_step_matches_reference(dtype, accumulate):
     _reference_step(X, batch_indices, centers_ref, weight_ema_ref, 0.3, stats_ref)
 
     stats = epoch_stats() or [None, None]
-    _emeans_step(
+    if csr_container is None:
+        step = _emeans_step
+    else:
+        centers_T = np.empty((n_features, n_clusters), dtype=dtype)
+        step = partial(_emeans_step_sparse, centers_T=centers_T)
+    step(
         X,
         batch_indices,
         centers,
@@ -102,13 +125,34 @@ def test_emeans_step_full_step_size_gives_batch_means():
     assert_allclose(centers, expected)
 
 
-def test_emeans_does_not_depend_on_n_threads():
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_emeans_does_not_depend_on_n_threads(csr_container):
     X, _ = make_blobs(n_samples=5000, n_features=20, centers=30, random_state=0)
+    if csr_container is not None:
+        X[X < 0] = 0
+        X = csr_container(X)
     emeans = EMeans(n_clusters=30, random_state=0)
     with threadpool_limits(limits=1, user_api="openmp"):
         centers_sequential = emeans.fit(X).cluster_centers_
     centers_parallel = emeans.fit(X).cluster_centers_
     assert_array_equal(centers_sequential, centers_parallel)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_emeans_dense_sparse(csr_container, dtype):
+    X, _ = make_blobs(n_samples=2000, n_features=10, centers=10, random_state=0)
+    X[X < 0] = 0
+    X = X.astype(dtype)
+    emeans_dense = EMeans(n_clusters=10, random_state=0).fit(X)
+    emeans_sparse = EMeans(n_clusters=10, random_state=0).fit(csr_container(X))
+    rtol = 1e-5 if dtype == np.float32 else 1e-10
+    assert emeans_sparse.cluster_centers_.dtype == dtype
+    assert_allclose(
+        emeans_dense.cluster_centers_, emeans_sparse.cluster_centers_, rtol=rtol
+    )
+    assert_array_equal(emeans_dense.labels_, emeans_sparse.labels_)
+    assert emeans_dense.inertia_ == pytest.approx(emeans_sparse.inertia_, rel=rtol)
 
 
 def test_emeans_float32_float64():
@@ -218,16 +262,21 @@ def test_emeans_n_samples_lower_than_n_clusters():
         EMeans(n_clusters=4).fit(np.zeros((3, 2)))
 
 
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("n_samples", [1, 255, 1000])
 @pytest.mark.parametrize("offset", [0, 100])
-def test_labels_inertia_matches_reference(dtype, n_samples, offset):
+def test_labels_inertia_matches_reference(csr_container, dtype, n_samples, offset):
     rng = np.random.RandomState(0)
     X = (rng.normal(size=(n_samples, 7)) + offset).astype(dtype)
     centers = (rng.normal(size=(13, 7)) + offset).astype(dtype)
 
     labels = np.empty(n_samples, dtype=np.int32)
-    inertia = _labels_inertia(X, centers, labels, 2)
+    if csr_container is None:
+        inertia = _labels_inertia(X, centers, labels, 2)
+    else:
+        X[rng.uniform(size=X.shape) < 0.5] = 0
+        inertia = _labels_inertia_sparse(csr_container(X), centers, labels, 2)
 
     X64, centers64 = X.astype(np.float64), centers.astype(np.float64)
     distances = ((X64[:, None, :] - centers64[None, :, :]) ** 2).sum(axis=2)
@@ -251,6 +300,19 @@ def test_emeans_predict_transform_score():
     assert emeans.score(X_new) == pytest.approx(-distances.min(axis=1).sum())
     assert_array_equal(emeans.fit_predict(X), emeans.labels_)
     assert emeans.fit_transform(X).shape == (1000, 10)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_emeans_predict_transform_score_sparse(csr_container):
+    X, _ = make_blobs(n_samples=1000, n_features=5, centers=10, random_state=0)
+    emeans = EMeans(n_clusters=10, random_state=0).fit(X)
+    X_new = np.random.RandomState(1).normal(size=(50, 5))
+    X_new[X_new < 0] = 0
+    X_new_sparse = csr_container(X_new)
+
+    assert_array_equal(emeans.predict(X_new_sparse), emeans.predict(X_new))
+    assert_allclose(emeans.transform(X_new_sparse), emeans.transform(X_new))
+    assert emeans.score(X_new_sparse) == pytest.approx(emeans.score(X_new))
 
 
 def test_emeans_predict_other_dtype():

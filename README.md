@@ -36,7 +36,7 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   epoch, which is always a full pass.
 - `init` is `"random"`, `"k-means++"`, an array of initial centers or a
   callable. `"k-means++"` is the greedy k-means++ of scikit-learn, copied from
-  its main branch, where it is 20-70x faster than in scikit-learn 1.9. It
+  its main branch, where it is 20-45x faster than in scikit-learn 1.9. It
   takes `n_clusters` passes over the data, often longer than the 5 epochs of
   e-means, but on data with a strong cluster structure it reaches a lower
   inertia than `"random"` with any number of epochs.

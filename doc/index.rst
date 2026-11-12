@@ -36,6 +36,7 @@ Contents
 .. toctree::
    :maxdepth: 1
 
+   user_guide
    api
    auto_examples/index
 

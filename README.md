@@ -34,7 +34,11 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 
 - `n_epochs` can be fractional: the fractional pass comes before the last
   epoch, which is always a full pass.
-- `init` is `"random"`, an array of initial centers or a callable.
+- `init` is `"random"`, `"k-means||"`, an array of initial centers or a
+  callable. `"k-means||"` is scalable k-means++ (Bahmani et al.,
+  [arXiv:1203.6402](https://arxiv.org/abs/1203.6402)): a few parallel
+  sampling rounds over the data, then a weighted k-means++ on the sampled
+  candidates.
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.
 - Fitted attributes: `cluster_centers_`, `labels_`, `inertia_` and

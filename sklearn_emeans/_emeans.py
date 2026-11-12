@@ -25,6 +25,7 @@ from sklearn_emeans._kernels import (
     _labels_inertia,
     _omp_max_threads,
 )
+from sklearn_emeans._kmeans_parallel import _kmeans_parallel
 
 # The constants below are the ones of the reference implementation
 # (faiss/contrib/e_means/base.py), which differ slightly from the paper.
@@ -221,12 +222,20 @@ class EMeans(
         The number of clusters to form as well as the number of
         centroids to generate.
 
-    init : 'random', callable or array-like of shape (n_clusters, n_features), \
-            default='random'
+    init : {'random', 'k-means||'}, callable or array-like of shape \
+            (n_clusters, n_features), default='random'
         Method for initialization:
 
         'random': choose `n_clusters` observations (rows) at random from data
         for the initial centroids.
+
+        'k-means||': scalable k-means++ [2]_. A few rounds sample candidates
+        with probabilities proportional to their squared distance to the
+        candidates so far, then a weighted k-means++ on the candidates gives
+        the initial centroids. It costs about as much as a 5-epoch fit. It
+        helps most when the data has many dense regions (e.g. well-separated
+        blobs or low-dimensional data), where random init leaves some of them
+        without a center.
 
         If an array is passed, it should be of shape (n_clusters, n_features)
         and gives the initial centers.
@@ -297,6 +306,10 @@ class EMeans(
        M. Douze and H. Jégou, "e-means: outperforming k-means (in one-tenth
        the epochs)", 2026. `arXiv:2611.09501 <https://arxiv.org/abs/2611.09501>`_
 
+    .. [2] B. Bahmani, B. Moseley, A. Vattani, R. Kumar and S. Vassilvitskii,
+       "Scalable K-Means++", Proceedings of the VLDB Endowment, 2012.
+       `arXiv:1203.6402 <https://arxiv.org/abs/1203.6402>`_
+
     Examples
     --------
     >>> from sklearn_emeans import EMeans
@@ -340,15 +353,15 @@ class EMeans(
         ):
             raise ValueError(f"n_epochs must be a float > 0, got {self.n_epochs!r}.")
         if isinstance(self.init, str):
-            if self.init != "random":
+            if self.init not in ("random", "k-means||"):
                 raise ValueError(
-                    "init must be 'random', a callable or an array-like, got "
-                    f"{self.init!r}."
+                    "init must be 'random', 'k-means||', a callable or an "
+                    f"array-like, got {self.init!r}."
                 )
         elif not callable(self.init) and not hasattr(self.init, "__len__"):
             raise ValueError(
-                "init must be 'random', a callable or an array-like, got "
-                f"{self.init!r}."
+                "init must be 'random', 'k-means||', a callable or an "
+                f"array-like, got {self.init!r}."
             )
 
     def _check_centers(self, centers, X):
@@ -366,7 +379,11 @@ class EMeans(
             )
         return centers
 
-    def _init_centers(self, X, random_state):
+    def _init_centers(self, X, random_state, n_threads):
+        if isinstance(self.init, str) and self.init == "k-means||":
+            return _kmeans_parallel(
+                X, self.n_clusters, random_state, n_threads, _threadpool_controller()
+            )
         if isinstance(self.init, str):
             # Same draw as scikit-learn's KMeans with init="random" and unit
             # sample weights.
@@ -415,7 +432,10 @@ class EMeans(
         max_n_threads = _openmp_effective_n_threads()
 
         centers = np.array(
-            self._init_centers(X, random_state), dtype=X.dtype, order="C", copy=True
+            self._init_centers(X, random_state, max_n_threads),
+            dtype=X.dtype,
+            order="C",
+            copy=True,
         )
 
         batch_size = _resolve_batch_size(

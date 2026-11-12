@@ -14,6 +14,9 @@ A step on a mini-batch has two parallel phases:
 
 `_labels_inertia` assigns all the samples with the same chunked GEMM, without
 the gather.
+
+`_update_min_distances` uses the same chunked GEMM to update the distances of
+the samples to their nearest center, for the k-means|| initialization.
 """
 
 from cython cimport floating
@@ -241,6 +244,84 @@ def _labels_inertia(
     free(chunk_inertia)
     free(centers_squared_norms)
     return inertia
+
+
+def _update_min_distances(
+    const floating[:, ::1] X,        # IN
+    const floating[:, ::1] centers,  # IN
+    floating[::1] min_distances,     # INOUT
+    int[::1] labels,                 # INOUT, or None
+    int label_offset,
+    int n_threads,
+):
+    """Update the squared distances of the samples to their nearest center.
+
+    For each sample x_i, with c_j the given centers:
+        d²_i <- min(d²_i, min_j ||x_i - c_j||²)
+    If `labels` is not None, the samples whose distance decreases get the
+    label `label_offset + argmin_j ||x_i - c_j||²`. The distances use the GEMM
+    trick, clipped at 0. The result doesn't depend on the number of threads.
+    """
+    cdef:
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = X.shape[1]
+        intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t chunk_idx, start, n_rows, r, i, j
+        int *labels_ptr = NULL
+        int *chunk_labels = NULL
+        floating *centers_squared_norms
+        floating *distances = NULL
+        floating dist
+
+    if n_samples == 0 or n_clusters == 0:
+        return
+
+    if labels is not None:
+        labels_ptr = &labels[0]
+
+    n_threads = min(n_threads, n_chunks)
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+
+    with nogil:
+        for j in range(n_clusters):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+
+        with parallel(num_threads=n_threads):
+            distances = <floating*> malloc(CHUNK_SIZE * n_clusters * sizeof(floating))
+            chunk_labels = <int*> malloc(CHUNK_SIZE * sizeof(int))
+
+            for chunk_idx in prange(n_chunks, schedule='static'):
+                start = chunk_idx * CHUNK_SIZE
+                n_rows = min(CHUNK_SIZE, n_samples - start)
+                # distances = ||c||² - 2 x.c, and its argmin
+                _assign_rows(
+                    &X[start, 0],
+                    n_rows,
+                    &centers[0, 0],
+                    centers_squared_norms,
+                    n_clusters,
+                    n_features,
+                    chunk_labels,
+                    distances,
+                    NULL,
+                )
+                for r in range(n_rows):
+                    i = start + r
+                    # d² = max(||x||² + ||c||² - 2 x.c, 0)
+                    dist = (_squared_norm(&X[i, 0], n_features)
+                            + distances[r * n_clusters + chunk_labels[r]])
+                    if dist < 0:
+                        dist = 0
+                    if dist < min_distances[i]:
+                        min_distances[i] = dist
+                        if labels_ptr != NULL:
+                            labels_ptr[i] = label_offset + chunk_labels[r]
+
+            free(distances)
+            free(chunk_labels)
+
+    free(centers_squared_norms)
 
 
 cdef inline floating _squared_norm(

@@ -34,11 +34,16 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 
 - `n_epochs` can be fractional: the fractional pass comes before the last
   epoch, which is always a full pass.
-- `init` is `"random"`, `"k-means||"`, an array of initial centers or a
-  callable. `"k-means||"` is scalable k-means++ (Bahmani et al.,
+- `init` is `"random"`, `"k-means++"`, `"k-means||"`, an array of initial
+  centers or a callable. `"k-means++"` is the greedy k-means++ of
+  scikit-learn, copied from its main branch, where it is 20-45x faster than in
+  scikit-learn 1.9. It takes `n_clusters` passes over the data, often longer
+  than the 5 epochs of e-means, but on data with a strong cluster structure it
+  reaches a lower inertia than `"random"` with any number of epochs.
+  `"k-means||"` is scalable k-means++ (Bahmani et al.,
   [arXiv:1203.6402](https://arxiv.org/abs/1203.6402)): a few parallel
   sampling rounds over the data, then a weighted k-means++ on the sampled
-  candidates.
+  candidates. It's much faster than `"k-means++"` for a similar inertia.
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.
 - Fitted attributes: `cluster_centers_`, `labels_`, `inertia_` and
@@ -47,7 +52,8 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 `labels_` and `inertia_` come from an extra assignment pass on the final
 centers, so that `fit(X).labels_` is the same as `predict(X)`.
 
-The input must be dense (float32 or float64, float32 is faster). There is no
+The input can be dense or a sparse CSR matrix (other sparse formats are
+converted to CSR), in float32 or float64 (float32 is faster). There is no
 `sample_weight` yet.
 
 ## Algorithm
@@ -66,6 +72,8 @@ centers as its `NumpyEmeans`, up to float32 rounding.
 Each step assigns a mini-batch to the nearest centers with a chunked GEMM,
 then updates the centers in parallel over centers, so the result doesn't
 depend on the number of threads.
+On sparse input, the GEMM is replaced by sparse dot products against the
+transposed centers.
 
 ## Performance
 
@@ -75,6 +83,13 @@ same or lower inertia. For example, 1M samples x 128 features with 1024
 clusters take 0.70 s against 5.2 s. See
 [cakedev0/scikit-learn#46](https://github.com/cakedev0/scikit-learn/pull/46)
 for the full benchmark, which uses the same kernel.
+
+On sparse input, with 22 threads on 22 cores of the same Xeon (one NUMA node,
+with SMT siblings), `EMeans` fits 10-40x faster than `KMeans(n_init=1)`
+(scikit-learn 1.10.dev0) on the TF-IDF of 20 newsgroups and on RCV1 (float32,
+20 or 100 clusters), with an inertia within 0.2%. For example, RCV1 (804k
+samples x 47k features, density 0.16%) with 100 clusters takes 1.2 s against
+48 s. See [#3](https://github.com/cakedev0/sklearn-contrib-emeans/pull/3).
 
 The best batch size depends on the dataset: on some datasets, batches 4x
 smaller or larger than the scaling law's give a lower inertia for the same

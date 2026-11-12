@@ -1,5 +1,8 @@
+from functools import partial
+
 import numpy as np
 import pytest
+import scipy.sparse as sp
 from numpy.testing import assert_allclose, assert_array_equal
 from sklearn.cluster import KMeans
 from sklearn.datasets import make_blobs
@@ -12,22 +15,28 @@ from sklearn_emeans._emeans import (
     _resolve_batch_size,
     _resolve_initial_step_size,
     _revive_dead_clusters,
-    _threadpool_controller,
 )
 from sklearn_emeans._kernels import (
     _emeans_step,
+    _emeans_step_sparse,
     _labels_inertia,
+    _labels_inertia_sparse,
     _update_min_distances,
+    _update_min_distances_sparse,
 )
 from sklearn_emeans._kmeans_parallel import (
     _kmeans_parallel,
     _kmeans_parallel_candidates,
 )
 
+CSR_CONTAINERS = [sp.csr_matrix, sp.csr_array]
+
 
 def _reference_step(X, batch_indices, centers, weight_ema, step_size, epoch_stats):
     """NumPy implementation of one e-means step, updating its inputs inplace."""
     X_batch = X[batch_indices]
+    if sp.issparse(X_batch):
+        X_batch = X_batch.toarray()
     distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
     labels = distances.argmin(axis=1)
 
@@ -47,12 +56,18 @@ def _reference_step(X, batch_indices, centers, weight_ema, step_size, epoch_stat
         weight_ema[j] = new_weight
 
 
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_emeans_step_matches_reference(dtype, accumulate):
+def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
     rng = np.random.RandomState(0)
     n_samples, n_features, n_clusters, batch_size = 1000, 7, 13, 600
     X = rng.normal(size=(n_samples, n_features)).astype(dtype)
+    if csr_container is not None:
+        # Sparse rows, some of them empty.
+        X[X < 0.5] = 0
+        X[:50] = 0
+        X = csr_container(X)
     centers = rng.normal(size=(n_clusters, n_features)).astype(dtype)
     # A center far from the data gets no row.
     centers[0] = 100
@@ -72,7 +87,12 @@ def test_emeans_step_matches_reference(dtype, accumulate):
     _reference_step(X, batch_indices, centers_ref, weight_ema_ref, 0.3, stats_ref)
 
     stats = epoch_stats() or [None, None]
-    _emeans_step(
+    if csr_container is None:
+        step = _emeans_step
+    else:
+        centers_T = np.empty((n_features, n_clusters), dtype=dtype)
+        step = partial(_emeans_step_sparse, centers_T=centers_T)
+    step(
         X,
         batch_indices,
         centers,
@@ -111,13 +131,34 @@ def test_emeans_step_full_step_size_gives_batch_means():
     assert_allclose(centers, expected)
 
 
-def test_emeans_does_not_depend_on_n_threads():
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_emeans_does_not_depend_on_n_threads(csr_container):
     X, _ = make_blobs(n_samples=5000, n_features=20, centers=30, random_state=0)
+    if csr_container is not None:
+        X[X < 0] = 0
+        X = csr_container(X)
     emeans = EMeans(n_clusters=30, random_state=0)
     with threadpool_limits(limits=1, user_api="openmp"):
         centers_sequential = emeans.fit(X).cluster_centers_
     centers_parallel = emeans.fit(X).cluster_centers_
     assert_array_equal(centers_sequential, centers_parallel)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_emeans_dense_sparse(csr_container, dtype):
+    X, _ = make_blobs(n_samples=2000, n_features=10, centers=10, random_state=0)
+    X[X < 0] = 0
+    X = X.astype(dtype)
+    emeans_dense = EMeans(n_clusters=10, random_state=0).fit(X)
+    emeans_sparse = EMeans(n_clusters=10, random_state=0).fit(csr_container(X))
+    rtol = 1e-5 if dtype == np.float32 else 1e-10
+    assert emeans_sparse.cluster_centers_.dtype == dtype
+    assert_allclose(
+        emeans_dense.cluster_centers_, emeans_sparse.cluster_centers_, rtol=rtol
+    )
+    assert_array_equal(emeans_dense.labels_, emeans_sparse.labels_)
+    assert emeans_dense.inertia_ == pytest.approx(emeans_sparse.inertia_, rel=rtol)
 
 
 def test_emeans_float32_float64():
@@ -145,9 +186,12 @@ def test_emeans_inertia_close_to_kmeans(n_features):
     assert emeans.inertia_ < 1.03 * kmeans.inertia_
 
 
-@pytest.mark.parametrize("init", ["random", "k-means||"])
-def test_emeans_recovers_blobs(init):
+@pytest.mark.parametrize("init", ["random", "k-means++", "k-means||"])
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_emeans_recovers_blobs(init, csr_container):
     X, y = make_blobs(n_samples=3000, n_features=5, centers=5, random_state=42)
+    if csr_container is not None:
+        X = csr_container(X)
     emeans = EMeans(n_clusters=5, init=init, random_state=0).fit(X)
     assert adjusted_rand_score(y, emeans.labels_) == pytest.approx(1)
 
@@ -228,16 +272,21 @@ def test_emeans_n_samples_lower_than_n_clusters():
         EMeans(n_clusters=4).fit(np.zeros((3, 2)))
 
 
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("n_samples", [1, 255, 1000])
 @pytest.mark.parametrize("offset", [0, 100])
-def test_labels_inertia_matches_reference(dtype, n_samples, offset):
+def test_labels_inertia_matches_reference(csr_container, dtype, n_samples, offset):
     rng = np.random.RandomState(0)
     X = (rng.normal(size=(n_samples, 7)) + offset).astype(dtype)
     centers = (rng.normal(size=(13, 7)) + offset).astype(dtype)
 
     labels = np.empty(n_samples, dtype=np.int32)
-    inertia = _labels_inertia(X, centers, labels, 2)
+    if csr_container is None:
+        inertia = _labels_inertia(X, centers, labels, 2)
+    else:
+        X[rng.uniform(size=X.shape) < 0.5] = 0
+        inertia = _labels_inertia_sparse(csr_container(X), centers, labels, 2)
 
     X64, centers64 = X.astype(np.float64), centers.astype(np.float64)
     distances = ((X64[:, None, :] - centers64[None, :, :]) ** 2).sum(axis=2)
@@ -261,6 +310,19 @@ def test_emeans_predict_transform_score():
     assert emeans.score(X_new) == pytest.approx(-distances.min(axis=1).sum())
     assert_array_equal(emeans.fit_predict(X), emeans.labels_)
     assert emeans.fit_transform(X).shape == (1000, 10)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_emeans_predict_transform_score_sparse(csr_container):
+    X, _ = make_blobs(n_samples=1000, n_features=5, centers=10, random_state=0)
+    emeans = EMeans(n_clusters=10, random_state=0).fit(X)
+    X_new = np.random.RandomState(1).normal(size=(50, 5))
+    X_new[X_new < 0] = 0
+    X_new_sparse = csr_container(X_new)
+
+    assert_array_equal(emeans.predict(X_new_sparse), emeans.predict(X_new))
+    assert_allclose(emeans.transform(X_new_sparse), emeans.transform(X_new))
+    assert emeans.score(X_new_sparse) == pytest.approx(emeans.score(X_new))
 
 
 def test_emeans_predict_other_dtype():
@@ -289,7 +351,7 @@ def test_emeans_init_array_and_callable():
         ({"n_clusters": 0}, "n_clusters must be an int >= 1"),
         ({"n_clusters": 2.5}, "n_clusters must be an int >= 1"),
         ({"n_epochs": 0}, "n_epochs must be a float > 0"),
-        ({"init": "k-means++"}, "init must be 'random'"),
+        ({"init": "unknown"}, "init must be 'random', 'k-means\\+\\+'"),
         ({"init": np.zeros((3, 2))}, "does not match the number of clusters"),
         ({"init": np.zeros((2, 3))}, "does not match the number of features"),
     ],
@@ -302,9 +364,12 @@ def test_emeans_invalid_params(params, match):
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("with_labels", [False, True])
-def test_update_min_distances_matches_reference(dtype, with_labels):
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_update_min_distances_matches_reference(dtype, with_labels, csr_container):
     rng = np.random.RandomState(0)
     X = rng.normal(size=(1000, 7)).astype(dtype)
+    if csr_container is not None:
+        X[rng.uniform(size=X.shape) < 0.5] = 0
     centers = rng.normal(size=(13, 7)).astype(dtype)
     # Some samples are already closer to a previous center than to the new ones.
     min_distances = rng.uniform(0, 15, size=1000).astype(dtype)
@@ -316,7 +381,12 @@ def test_update_min_distances_matches_reference(dtype, with_labels):
     expected_distances = np.minimum(min_distances, distances.min(axis=1))
     expected_labels = np.where(closer, 5 + distances.argmin(axis=1), labels)
 
-    _update_min_distances(
+    if csr_container is None:
+        update_min_distances = _update_min_distances
+    else:
+        update_min_distances = _update_min_distances_sparse
+        X = csr_container(X)
+    update_min_distances(
         X, centers, min_distances, labels if with_labels else None, 5, 2
     )
     rtol = 1e-4 if dtype == np.float32 else 1e-10
@@ -361,8 +431,12 @@ def test_kmeans_parallel_candidates(n_clusters):
     ],
     ids=["n_samples_eq_n_clusters", "duplicates", "constant"],
 )
-def test_kmeans_parallel_few_distinct_samples(X):
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_kmeans_parallel_few_distinct_samples(X, csr_container):
     n_clusters = 5
+    n_distinct = min(n_clusters, len(np.unique(X, axis=0)))
+    if csr_container is not None:
+        X = csr_container(X)
     candidates, weights = _kmeans_parallel_candidates(
         X, n_clusters, np.random.RandomState(0), 2
     )
@@ -370,25 +444,22 @@ def test_kmeans_parallel_few_distinct_samples(X):
     assert len(np.unique(candidates)) == len(candidates)
     assert weights.sum() == X.shape[0]
 
-    centers = _kmeans_parallel(
-        X, n_clusters, np.random.RandomState(0), 2, _threadpool_controller()
-    )
+    centers = _kmeans_parallel(X, n_clusters, np.random.RandomState(0), 2)
     assert centers.shape == (n_clusters, X.shape[1])
     # All the distinct samples are centers.
-    n_distinct = min(n_clusters, len(np.unique(X, axis=0)))
     assert len(np.unique(centers, axis=0)) == n_distinct
     EMeans(n_clusters=n_clusters, init="k-means||", random_state=0).fit(X)
 
 
-def test_kmeans_parallel_does_not_depend_on_n_threads():
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_kmeans_parallel_does_not_depend_on_n_threads(csr_container):
     X, _ = make_blobs(n_samples=5000, n_features=20, centers=30, random_state=0)
     X = X.astype(np.float32)
-    sequential = _kmeans_parallel(
-        X, 30, np.random.RandomState(0), 1, _threadpool_controller()
-    )
-    parallel = _kmeans_parallel(
-        X, 30, np.random.RandomState(0), 4, _threadpool_controller()
-    )
+    if csr_container is not None:
+        X[np.abs(X) < 3] = 0
+        X = csr_container(X)
+    sequential = _kmeans_parallel(X, 30, np.random.RandomState(0), 1)
+    parallel = _kmeans_parallel(X, 30, np.random.RandomState(0), 4)
     assert_array_equal(sequential, parallel)
 
     emeans = EMeans(n_clusters=30, init="k-means||", random_state=0)
@@ -403,12 +474,39 @@ def test_kmeans_parallel_one_center_per_blob():
     X, y = make_blobs(
         n_samples=20_000, n_features=10, centers=100, cluster_std=0.1, random_state=0
     )
-    centers = _kmeans_parallel(
-        X, 100, np.random.RandomState(0), 2, _threadpool_controller()
-    )
+    centers = _kmeans_parallel(X, 100, np.random.RandomState(0), 2)
     distances = ((centers[:, None, :] - X[None, :, :]) ** 2).sum(axis=2)
     blobs = y[distances.argmin(axis=1)]
     assert len(np.unique(blobs)) == 100
 
     emeans = EMeans(n_clusters=100, init="k-means||", random_state=0).fit(X)
     assert adjusted_rand_score(y, emeans.labels_) == pytest.approx(1)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_kmeans_parallel_sparse_matches_dense(dtype, csr_container):
+    X, _ = make_blobs(n_samples=3000, n_features=20, centers=30, random_state=0)
+    X[np.abs(X) < 3] = 0
+    X = X.astype(dtype)
+    X_csr = csr_container(X)
+
+    candidates, weights = _kmeans_parallel_candidates(
+        X, 30, np.random.RandomState(0), 2
+    )
+    candidates_csr, weights_csr = _kmeans_parallel_candidates(
+        X_csr, 30, np.random.RandomState(0), 2
+    )
+    centers = _kmeans_parallel(X, 30, np.random.RandomState(0), 2)
+    centers_csr = _kmeans_parallel(X_csr, 30, np.random.RandomState(0), 2)
+    if dtype == np.float64:
+        assert_array_equal(candidates, candidates_csr)
+        assert_array_equal(weights, weights_csr)
+        assert_allclose(centers, centers_csr)
+    else:
+        # The sparse distances round differently than the GEMM: a near tie
+        # can change a label or a sampled candidate.
+        assert len(np.intersect1d(candidates, candidates_csr)) > 0.9 * len(candidates)
+        inertia = EMeans(n_clusters=30, init=centers).fit(X).inertia_
+        inertia_csr = EMeans(n_clusters=30, init=centers_csr).fit(X).inertia_
+        assert inertia_csr == pytest.approx(inertia, rel=0.01)

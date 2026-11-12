@@ -3,9 +3,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
-from sklearn.cluster import kmeans_plusplus
+import scipy.sparse as sp
+from sklearn.utils.extmath import row_norms
 
-from sklearn_emeans._kernels import _update_min_distances
+from sklearn_emeans._kernels import (
+    _update_min_distances,
+    _update_min_distances_sparse,
+)
+from sklearn_emeans._kmeans_plusplus import _kmeans_plusplus
 
 # Number of sampling rounds. The paper finds ~5 rounds enough in its
 # experiments.
@@ -16,7 +21,7 @@ _KMEANS_PARALLEL_N_ROUNDS = 5
 _KMEANS_PARALLEL_OVERSAMPLING = 2.0
 
 
-def _kmeans_parallel(X, n_clusters, random_state, n_threads, threadpool_controller):
+def _kmeans_parallel(X, n_clusters, random_state, n_threads):
     """Initial centers given by k-means|| (Bahmani et al., 2012).
 
     The first candidate is a sample drawn uniformly. Then each round samples
@@ -24,12 +29,16 @@ def _kmeans_parallel(X, n_clusters, random_state, n_threads, threadpool_controll
     where `d²(x)` is the squared distance of x to its nearest candidate and
     `l = _KMEANS_PARALLEL_OVERSAMPLING * n_clusters`. Each candidate is weighted
     by the number of samples whose nearest candidate it is, and a weighted
-    k-means++ on the candidates gives the `n_clusters` centers.
+    greedy k-means++ on the candidates gives the `n_clusters` centers.
+
+    The caller must limit BLAS to one thread, since the BLAS calls of the
+    kernels run inside OpenMP threads.
 
     Parameters
     ----------
-    X : ndarray of shape (n_samples, n_features), dtype=floating
-        C-contiguous data, with `n_samples >= n_clusters`.
+    X : {ndarray, CSR matrix} of shape (n_samples, n_features), dtype=floating
+        C-contiguous data, or a CSR matrix with int32 indices, with
+        `n_samples >= n_clusters`.
 
     n_clusters : int
         Number of centers.
@@ -41,20 +50,22 @@ def _kmeans_parallel(X, n_clusters, random_state, n_threads, threadpool_controll
     n_threads : int
         Number of OpenMP threads.
 
-    threadpool_controller : ThreadpoolController
-        Used to limit BLAS to one thread in the sampling rounds, whose BLAS
-        calls run inside OpenMP threads.
-
     Returns
     -------
     centers : ndarray of shape (n_clusters, n_features), dtype=X.dtype
     """
-    with threadpool_controller.limit(limits=1, user_api="blas"):
-        candidates, weights = _kmeans_parallel_candidates(
-            X, n_clusters, random_state, n_threads
-        )
-    centers, _ = kmeans_plusplus(
-        X[candidates], n_clusters, sample_weight=weights, random_state=random_state
+    indices, weights = _kmeans_parallel_candidates(
+        X, n_clusters, random_state, n_threads
+    )
+    # A CSR matrix if X is sparse: the k-means++ densifies only the centers.
+    candidates = X[indices]
+    centers, _ = _kmeans_plusplus(
+        candidates,
+        n_clusters,
+        row_norms(candidates, squared=True),
+        weights,
+        random_state,
+        n_threads=n_threads,
     )
     return centers
 
@@ -68,6 +79,9 @@ def _kmeans_parallel_candidates(X, n_clusters, random_state, n_threads):
     """
     n_samples = X.shape[0]
     oversampling = _KMEANS_PARALLEL_OVERSAMPLING * n_clusters
+    update_min_distances = (
+        _update_min_distances_sparse if sp.issparse(X) else _update_min_distances
+    )
     min_distances = np.full(n_samples, np.inf, dtype=X.dtype)
     labels = np.zeros(n_samples, dtype=np.int32)
     candidates = []
@@ -75,9 +89,15 @@ def _kmeans_parallel_candidates(X, n_clusters, random_state, n_threads):
 
     def add_candidates(new):
         # Only the new candidates can decrease the distances: no need to
-        # compute the distances to the previous ones again.
+        # compute the distances to the previous ones again. With sparse X,
+        # only the candidates of this round are densified.
         nonlocal n_candidates
-        _update_min_distances(X, X[new], min_distances, labels, n_candidates, n_threads)
+        new_centers = X[new]
+        if sp.issparse(new_centers):
+            new_centers = new_centers.toarray()
+        update_min_distances(
+            X, new_centers, min_distances, labels, n_candidates, n_threads
+        )
         # A candidate is its own nearest candidate, even if it has duplicates.
         # With d² = 0, it is never sampled again.
         min_distances[new] = 0

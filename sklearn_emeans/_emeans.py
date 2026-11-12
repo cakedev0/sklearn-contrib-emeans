@@ -24,8 +24,8 @@ from threadpoolctl import ThreadpoolController
 
 from sklearn_emeans._kernels import (
     _chunk_size,
-    _emeans_step,
-    _emeans_step_sparse,
+    _emeans_steps,
+    _emeans_steps_sparse,
     _labels_inertia,
     _labels_inertia_sparse,
     _omp_max_threads,
@@ -486,13 +486,8 @@ class EMeans(
         epoch_sums = np.zeros((n_clusters, n_features), dtype=np.float64)
         epoch_counts = np.zeros(n_clusters, dtype=np.float64)
 
-        if sp.issparse(X):
-            emeans_step = partial(
-                _emeans_step_sparse,
-                centers_T=np.empty((n_features, n_clusters), dtype=X.dtype),
-            )
-        else:
-            emeans_step = _emeans_step
+        emeans_steps = _emeans_steps_sparse if sp.issparse(X) else _emeans_steps
+        revive = partial(_revive_dead_clusters, centers, weight_ema, random_state)
 
         step = 0
         with _threadpool_controller().limit(limits=1, user_api="blas"):
@@ -503,20 +498,31 @@ class EMeans(
                 permutation = random_state.permutation(n_samples).astype(
                     np.intp, copy=False
                 )
-                for start in range(0, n_rows, batch_size):
-                    emeans_step(
-                        X,
-                        permutation[start : min(start + batch_size, n_rows)],
-                        centers,
-                        weight_ema,
-                        _scheduled_step_size(initial_step_size, step, n_steps),
-                        epoch_sums if is_last_epoch else None,
-                        epoch_counts if is_last_epoch else None,
-                        n_threads,
-                    )
-                    step += 1
-                    if revival and step % _REVIVAL_PERIOD == 0:
-                        _revive_dead_clusters(centers, weight_ema, random_state)
+                n_epoch_steps = math.ceil(n_rows / batch_size)
+                step_sizes = np.array(
+                    [
+                        _scheduled_step_size(initial_step_size, step + i, n_steps)
+                        for i in range(n_epoch_steps)
+                    ]
+                )
+                # All the steps of the epoch in one call, which revives the
+                # dead clusters every `_REVIVAL_PERIOD` steps: see `_run_steps`
+                # in `_kernels.pyx`.
+                emeans_steps(
+                    X,
+                    permutation[:n_rows],
+                    batch_size,
+                    centers,
+                    weight_ema,
+                    step_sizes,
+                    epoch_sums if is_last_epoch else None,
+                    epoch_counts if is_last_epoch else None,
+                    step,
+                    _REVIVAL_PERIOD if revival else 0,
+                    revive,
+                    n_threads,
+                )
+                step += n_epoch_steps
 
         # The final centers are the means of the last epoch's assignments.
         # Centers that got no sample in the last epoch keep their EMA position.

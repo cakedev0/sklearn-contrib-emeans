@@ -86,7 +86,7 @@ def test_emeans_step_full_step_size_gives_batch_means():
     rng = np.random.RandomState(0)
     X = rng.normal(size=(200, 3))
     centers = X[:4].copy()
-    batch_indices = np.arange(200)
+    batch_indices = np.arange(200, dtype=np.intp)
     labels = ((X[:, None] - centers) ** 2).sum(axis=2).argmin(axis=1)
     _emeans_step(
         X,

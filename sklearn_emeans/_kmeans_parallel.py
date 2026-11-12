@@ -17,8 +17,9 @@ from sklearn_emeans._kmeans_plusplus import _kmeans_plusplus
 _KMEANS_PARALLEL_N_ROUNDS = 5
 
 # Each round samples about `_KMEANS_PARALLEL_OVERSAMPLING * n_clusters`
-# candidates, as in the experiments of the paper.
-_KMEANS_PARALLEL_OVERSAMPLING = 2.0
+# candidates. The paper uses 2, but 0.5 makes the init ~3x cheaper for about
+# the same final inertia after the e-means epochs (see the benchmarks of #4).
+_KMEANS_PARALLEL_OVERSAMPLING = 0.5
 
 
 def _kmeans_parallel(X, n_clusters, random_state, n_threads):

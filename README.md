@@ -75,11 +75,12 @@ clusters take 0.70 s against 5.2 s. See
 [cakedev0/scikit-learn#46](https://github.com/cakedev0/scikit-learn/pull/46)
 for the full benchmark, which uses the same kernel.
 
-On sparse input, in the same setting, `EMeans` fits 12-110x faster than
-`KMeans(n_init=1)` on the TF-IDF of 20 newsgroups and on RCV1 (float32, 20 or
-100 clusters), with an inertia within 0.2%. For example, RCV1 (804k samples x
-47k features, density 0.16%) with 100 clusters takes 0.94 s against 106 s. See
-[#3](https://github.com/cakedev0/sklearn-contrib-emeans/pull/3).
+On sparse input, with 22 threads on 22 cores of the same Xeon (one NUMA node,
+with SMT siblings), `EMeans` fits 10-40x faster than `KMeans(n_init=1)`
+(scikit-learn 1.10.dev0) on the TF-IDF of 20 newsgroups and on RCV1 (float32,
+20 or 100 clusters), with an inertia within 0.2%. For example, RCV1 (804k
+samples x 47k features, density 0.16%) with 100 clusters takes 1.2 s against
+48 s. See [#3](https://github.com/cakedev0/sklearn-contrib-emeans/pull/3).
 
 The best batch size depends on the dataset: on some datasets, batches 4x
 smaller or larger than the scaling law's give a lower inertia for the same

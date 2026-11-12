@@ -42,6 +42,11 @@ test = ["pytest>=7"]
 Homepage = "https://github.com/cakedev0/sklearn-contrib-emeans"
 Issues = "https://github.com/cakedev0/sklearn-contrib-emeans/issues"
 
+[tool.meson-python.args]
+# On Windows, use MSVC even when another compiler (e.g. MinGW from Strawberry
+# Perl on the GitHub runners) is on the PATH. Ignored on other platforms.
+setup = ["--vsenv"]
+
 [tool.pytest.ini_options]
 addopts = "--doctest-modules"
 testpaths = ["sklearn_emeans"]

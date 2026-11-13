@@ -5,6 +5,8 @@ on the namespaces and devices that are available: array-api-strict, PyTorch
 (CPU, CUDA, MPS, XPU) and CuPy.
 """
 
+import math
+
 import numpy as np
 import pytest
 import sklearn
@@ -389,3 +391,133 @@ def test_no_dispatch_without_config(xp_name, device):
     emeans = EMeans(n_clusters=20, random_state=0).fit(_to_device(xp_name, device, X))
     assert isinstance(emeans.cluster_centers_, np.ndarray)
     assert isinstance(emeans.labels_, np.ndarray)
+
+
+def _has_mps_kernels(device):
+    """Whether the Metal kernels are expected to work on the device."""
+    if device != "mps":
+        return False
+    import torch
+
+    return hasattr(torch.mps, "compile_shader")
+
+
+@pytest.mark.parametrize(
+    "n_samples, n_features, n_clusters",
+    [(3000, 10, 20), (1000, 3, 300), (2500, 16, 130), (700, 32, 5), (700, 1, 5)],
+)
+@pytest.mark.parametrize("with_epoch", [True, False])
+@pytest.mark.parametrize("revival_period", [0, 2])
+def test_mps_kernels_same_as_array_operations(
+    xp_name,
+    device,
+    n_samples,
+    n_features,
+    n_clusters,
+    with_epoch,
+    revival_period,
+    monkeypatch,
+):
+    # On Apple GPUs, the steps on low-dimensional data run with Metal kernels.
+    if not _has_mps_kernels(device):
+        pytest.skip("no Metal kernels on this device")
+    xp = _xp(xp_name)
+    X = _blobs(n_samples=n_samples, n_features=n_features, centers=n_clusters)
+    X_xp = _to_device(xp_name, device, X)
+    # Not a skip: the kernels must compile where PyTorch can compile them.
+    assert _array_api._use_mps_kernels(xp, X_xp)
+    dev = _array_api.device(X_xp)
+    rng = np.random.RandomState(0)
+    rows = rng.permutation(n_samples)[: n_samples - 100]
+    centers = X[rng.choice(n_samples, n_clusters, replace=False)]
+    # A center far from the data gets no row.
+    centers[0] = 1000
+    weight_ema = rng.uniform(size=n_clusters)
+    batch_size = 500
+    step_sizes = [0.5, 0.3, 0.2, 0.1, 0.1][: math.ceil(len(rows) / batch_size)]
+    centers_xp = _array_api.from_numpy(xp, centers, "float32", dev)
+    weight_ema_xp = _array_api.from_numpy(xp, weight_ema, "float32", dev)
+
+    def revive(centers, weight_ema):
+        # Not the real revival: in float32, it can amplify the rounding
+        # differences. As the real one, it changes the weights inplace. The
+        # centers are returned in a new tensor.
+        weight_ema *= 0.5
+        return 1.01 * centers, weight_ema
+
+    def steps():
+        epoch_sums = epoch_counts = None
+        if with_epoch:
+            epoch_sums = xp.zeros(
+                (n_clusters, n_features), dtype=xp.float32, device=dev
+            )
+            epoch_counts = xp.zeros(n_clusters, dtype=xp.float32, device=dev)
+        results = _array_api.emeans_steps(
+            xp,
+            X_xp,
+            _array_api.index_array(xp, rows, dev),
+            batch_size,
+            centers_xp,
+            weight_ema_xp,
+            step_sizes,
+            epoch_sums,
+            epoch_counts,
+            first_step=0,
+            revival_period=revival_period,
+            revive=revive,
+        )
+        assert results[0].dtype == xp.float32
+        return [None if a is None else _to_numpy(xp_name, a) for a in results]
+
+    results = steps()
+    # The inputs are not modified.
+    assert_array_equal(_to_numpy(xp_name, centers_xp), centers)
+    assert_array_equal(_to_numpy(xp_name, weight_ema_xp), weight_ema.astype(np.float32))
+    monkeypatch.setattr(_array_api, "_use_mps_kernels", lambda xp, X: False)
+    expected = steps()
+
+    n_revivals = len(step_sizes) // revival_period if revival_period else 0
+    assert_allclose(results[0][0], centers[0] * 1.01**n_revivals, rtol=1e-6)
+    for array, expected_array in zip(results, expected):
+        if expected_array is None:
+            assert array is None
+        else:
+            assert_allclose(array, expected_array, rtol=1e-4, atol=1e-4)
+
+
+def test_mps_kernels_only_for_low_dimensional_data(xp_name, device):
+    xp = _xp(xp_name)
+    for n_features, expected in [(32, _has_mps_kernels(device)), (33, False)]:
+        X_xp = _to_device(xp_name, device, _blobs(n_features=n_features))
+        assert _array_api._use_mps_kernels(xp, X_xp) == expected
+
+
+def test_mps_kernels_fall_back_to_array_operations(xp_name, device, monkeypatch):
+    # If the Metal source doesn't compile, the fit warns and still runs.
+    if not _has_mps_kernels(device):
+        pytest.skip("no Metal kernels on this device")
+    import torch
+
+    from sklearn_emeans import _mps_kernels
+
+    def compile_shader(source):
+        raise RuntimeError("rejected source")
+
+    X_xp = _to_device(xp_name, device, _blobs())
+    with sklearn.config_context(array_api_dispatch=True):
+        expected = EMeans(n_clusters=20, random_state=0).fit(X_xp)
+        monkeypatch.setattr(torch.mps, "compile_shader", compile_shader)
+        _mps_kernels._library.cache_clear()
+        try:
+            with pytest.warns(RuntimeWarning, match="Metal kernels.*rejected source"):
+                emeans = EMeans(n_clusters=20, random_state=0).fit(X_xp)
+        finally:
+            # Don't leave the failure in the cache for the other tests.
+            monkeypatch.undo()
+            _mps_kernels._library.cache_clear()
+    assert_allclose(
+        _to_numpy(xp_name, emeans.cluster_centers_),
+        _to_numpy(xp_name, expected.cluster_centers_),
+        rtol=1e-3,
+        atol=1e-3,
+    )

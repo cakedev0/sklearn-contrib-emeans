@@ -21,6 +21,7 @@ py.install_sources(
     '_emeans.py',
     '_kmeans_parallel.py',
     '_kmeans_plusplus.py',
+    '_mps_kernels.py',
   ],
   subdir: 'sklearn_emeans',
 )

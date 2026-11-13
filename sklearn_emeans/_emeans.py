@@ -621,6 +621,7 @@ class EMeans(
         operations of `_array_api.py` in place of the Cython kernels.
         """
         X = self._validate_array_api(xp, X, reset=True)
+        X = _array_api.as_steps_input(xp, X)
         n_samples, n_features = X.shape
         n_clusters = self.n_clusters
         if n_samples < n_clusters:

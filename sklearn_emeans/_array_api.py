@@ -8,7 +8,8 @@ give the same result up to rounding.
 
 Most of the code only uses the array API standard. The few operations that
 the standard lacks, or that are much faster with a library-specific function,
-are in the helpers at the top of this module.
+are in the helpers at the top of this module. On Apple GPUs, the steps on
+low-dimensional data run with the Metal kernels of `_mps_kernels.py`.
 """
 
 # SPDX-License-Identifier: BSD-3-Clause
@@ -52,6 +53,23 @@ def _is_torch(xp):
 
 def _is_cupy(xp):
     return array_api_compat.is_cupy_namespace(xp)
+
+
+def _use_mps_kernels(xp, X):
+    """Whether to run the steps with the Metal kernels of `_mps_kernels.py`."""
+    if not _is_torch(xp) or X.device.type != "mps":
+        return False
+    from sklearn_emeans import _mps_kernels
+
+    return _mps_kernels.supports(X)
+
+
+def as_steps_input(xp, X):
+    """X as `emeans_steps` needs it, to convert it once and not at each call."""
+    if _use_mps_kernels(xp, X):
+        # The Metal kernels read the rows of X from a contiguous buffer.
+        return X.contiguous()
+    return X
 
 
 def to_numpy(xp, array):
@@ -310,6 +328,22 @@ def emeans_steps(
     centers, weight_ema, epoch_sums, epoch_counts : the updated arrays
         The inputs may have been modified inplace or not.
     """
+    if _use_mps_kernels(xp, X):
+        from sklearn_emeans import _mps_kernels
+
+        return _mps_kernels.emeans_steps(
+            X,
+            rows,
+            batch_size,
+            centers,
+            weight_ema,
+            step_sizes,
+            epoch_sums,
+            epoch_counts,
+            first_step,
+            revival_period,
+            revive,
+        )
     n_clusters = centers.shape[0]
     n_rows = rows.shape[0]
     acc_dtype = weight_ema.dtype

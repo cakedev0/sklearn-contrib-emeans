@@ -23,7 +23,7 @@ emeans.predict(X_new)
 pip install sklearn-contrib-emeans
 ```
 
-It needs Python >= 3.10 and scikit-learn >= 1.6. The other dependencies
+It needs Python >= 3.10 and scikit-learn >= 1.7. The other dependencies
 (NumPy, SciPy, joblib, threadpoolctl) have the same minimum versions as in
 scikit-learn 1.10. The wheels are built with OpenMP: `EMeans` uses all the
 physical cores, or `OMP_NUM_THREADS` if it is set.

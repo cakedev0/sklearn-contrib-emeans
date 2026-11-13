@@ -310,6 +310,20 @@ def emeans_steps(
     centers, weight_ema, epoch_sums, epoch_counts : the updated arrays
         The inputs may have been modified inplace or not.
     """
+    if _is_torch(xp):
+        return _torch_emeans_steps(
+            X,
+            rows,
+            batch_size,
+            centers,
+            weight_ema,
+            step_sizes,
+            epoch_sums,
+            epoch_counts,
+            first_step,
+            revival_period,
+            revive,
+        )
     n_clusters = centers.shape[0]
     n_rows = rows.shape[0]
     acc_dtype = weight_ema.dtype
@@ -325,6 +339,63 @@ def emeans_steps(
         centers, weight_ema = _ema_update(
             xp, centers, weight_ema, sums, counts, step_size
         )
+
+        if revival_period > 0 and (first_step + s + 1) % revival_period == 0:
+            centers, weight_ema = revive(centers, weight_ema)
+    return centers, weight_ema, epoch_sums, epoch_counts
+
+
+def _torch_emeans_steps(
+    X,
+    rows,
+    batch_size,
+    centers,
+    weight_ema,
+    step_sizes,
+    epoch_sums,
+    epoch_counts,
+    first_step,
+    revival_period,
+    revive,
+):
+    """`emeans_steps` for PyTorch tensors, with half as many operations.
+
+    On small batches, the steps are bound by the launch of the operations on
+    the GPU, not by the computations: the buffers are reused and updated
+    inplace, and the EMA update is written as
+
+        c_j <- c_j + alpha / N'_j (s_j - n_j c_j)
+
+    with n_j the number of batch rows of the center, which needs no special
+    case for the centers without rows.
+    """
+    import torch
+
+    # Not to modify the inputs.
+    centers = centers.clone()
+    weight_ema = weight_ema.clone()
+    n_clusters = centers.shape[0]
+    n_rows = rows.shape[0]
+    sums = torch.empty_like(centers)
+    counts = torch.empty(n_clusters, dtype=X.dtype, device=X.device)
+    ones = torch.ones(min(batch_size, n_rows), dtype=X.dtype, device=X.device)
+    # A center without rows can have a zero weight: keep `alpha / N'_j` finite
+    # in the dtype of the centers, so that its update is exactly 0.
+    tiny = torch.finfo(centers.dtype).tiny
+    for s, step_size in enumerate(step_sizes):
+        start, stop = s * batch_size, min((s + 1) * batch_size, n_rows)
+        X_batch = X.index_select(0, rows[start:stop])
+        bias = torch.linalg.vecdot(centers, centers).mul_(-0.5)
+        labels = torch.nn.functional.linear(X_batch, centers, bias).argmax(dim=1)
+        sums.zero_().index_add_(0, labels, X_batch)
+        counts.zero_().index_add_(0, labels, ones[: stop - start])
+        if epoch_sums is not None:
+            epoch_sums.add_(sums)
+            epoch_counts.add_(counts)
+        weight_ema.mul_(1.0 - step_size).add_(counts, alpha=step_size)
+        coef = (step_size / weight_ema.clamp_min(tiny)).to(centers.dtype)
+        delta = torch.addcmul(sums, centers, counts[:, None], value=-1.0)
+        centers.addcmul_(delta, coef[:, None])
 
         if revival_period > 0 and (first_step + s + 1) % revival_period == 0:
             centers, weight_ema = revive(centers, weight_ema)

@@ -389,3 +389,41 @@ def test_no_dispatch_without_config(xp_name, device):
     emeans = EMeans(n_clusters=20, random_state=0).fit(_to_device(xp_name, device, X))
     assert isinstance(emeans.cluster_centers_, np.ndarray)
     assert isinstance(emeans.labels_, np.ndarray)
+
+
+def test_steps_dead_center_with_zero_weight(xp_name, device):
+    # A center without rows, whose EMA weight underflowed to 0, keeps its
+    # position, and the inputs are not modified.
+    xp = _xp(xp_name)
+    rng = np.random.RandomState(0)
+    X = rng.normal(size=(200, 4)).astype(np.float32)
+    centers = rng.normal(size=(5, 4)).astype(np.float32)
+    centers[0] = 100
+    X_xp = _to_device(xp_name, device, X)
+    dev = _array_api.device(X_xp)
+    acc_dtype = _array_api.accumulator_dtype(xp, dev)
+    weight_ema = np.array([0, 1, 1, 1, 1], dtype=acc_dtype)
+    centers_xp = _array_api.from_numpy(xp, centers, "float32", dev)
+    weight_ema_xp = _array_api.from_numpy(xp, weight_ema, acc_dtype, dev)
+
+    new_centers, new_weight_ema, _, _ = _array_api.emeans_steps(
+        xp,
+        X_xp,
+        _array_api.index_array(xp, np.arange(200), dev),
+        100,
+        centers_xp,
+        weight_ema_xp,
+        [0.5, 0.5],
+        None,
+        None,
+        first_step=0,
+        revival_period=0,
+        revive=None,
+    )
+    new_centers = _to_numpy(xp_name, new_centers)
+    assert_array_equal(new_centers[0], centers[0])
+    assert np.all(np.isfinite(new_centers))
+    assert np.all(np.abs(new_centers[1:] - centers[1:]).max(axis=1) > 0)
+    assert _to_numpy(xp_name, new_weight_ema)[0] == 0
+    assert_array_equal(_to_numpy(xp_name, centers_xp), centers)
+    assert_array_equal(_to_numpy(xp_name, weight_ema_xp), weight_ema)

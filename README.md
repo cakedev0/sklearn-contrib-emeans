@@ -80,6 +80,9 @@ emeans.cluster_centers_  # a tensor on the device of X
 - With `init="k-means||"`, the sampling rounds run on the device and the final
   k-means++ on the candidates runs on the host. `init="k-means++"` copies the
   data to the host.
+- On Apple GPUs, the steps on data with at most 32 features run with Metal
+  kernels that PyTorch compiles at run time: plain array operations are slow
+  on the small batches of low-dimensional data.
 - Only dense inputs.
 
 ## Algorithm

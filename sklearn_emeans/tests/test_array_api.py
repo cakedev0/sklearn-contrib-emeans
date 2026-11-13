@@ -5,6 +5,8 @@ on the namespaces and devices that are available: array-api-strict, PyTorch
 (CPU, CUDA, MPS, XPU) and CuPy.
 """
 
+import math
+
 import numpy as np
 import pytest
 import sklearn
@@ -389,3 +391,76 @@ def test_no_dispatch_without_config(xp_name, device):
     emeans = EMeans(n_clusters=20, random_state=0).fit(_to_device(xp_name, device, X))
     assert isinstance(emeans.cluster_centers_, np.ndarray)
     assert isinstance(emeans.labels_, np.ndarray)
+
+
+@pytest.mark.parametrize(
+    "n_samples, n_features, n_clusters",
+    [(3000, 10, 20), (1000, 3, 300), (2500, 16, 130), (700, 32, 5), (700, 1, 5)],
+)
+@pytest.mark.parametrize("with_epoch", [True, False])
+def test_mps_kernels_same_as_array_operations(
+    xp_name, device, n_samples, n_features, n_clusters, with_epoch, monkeypatch
+):
+    # On Apple GPUs, the steps on low-dimensional data run with Metal kernels.
+    xp = _xp(xp_name)
+    X = _blobs(n_samples=n_samples, n_features=n_features, centers=n_clusters)
+    X_xp = _to_device(xp_name, device, X)
+    if not _array_api._use_mps_kernels(xp, X_xp):
+        pytest.skip("no Metal kernels for this input")
+    dev = _array_api.device(X_xp)
+    rng = np.random.RandomState(0)
+    rows = rng.permutation(n_samples)[: n_samples - 100]
+    centers = X[rng.choice(n_samples, n_clusters, replace=False)]
+    # A center far from the data gets no row.
+    centers[0] = 1000
+    weight_ema = rng.uniform(size=n_clusters)
+    batch_size = 500
+    step_sizes = [0.5, 0.3, 0.2, 0.1, 0.1][: math.ceil(len(rows) / batch_size)]
+    centers_xp = _array_api.from_numpy(xp, centers, "float32", dev)
+    weight_ema_xp = _array_api.from_numpy(xp, weight_ema, "float32", dev)
+
+    def steps():
+        # No revival: in float32, it can amplify the rounding differences.
+        epoch_sums = epoch_counts = None
+        if with_epoch:
+            epoch_sums = xp.zeros(
+                (n_clusters, n_features), dtype=xp.float32, device=dev
+            )
+            epoch_counts = xp.zeros(n_clusters, dtype=xp.float32, device=dev)
+        results = _array_api.emeans_steps(
+            xp,
+            X_xp,
+            _array_api.index_array(xp, rows, dev),
+            batch_size,
+            centers_xp,
+            weight_ema_xp,
+            step_sizes,
+            epoch_sums,
+            epoch_counts,
+            first_step=0,
+            revival_period=0,
+            revive=None,
+        )
+        assert results[0].dtype == xp.float32
+        return [None if a is None else _to_numpy(xp_name, a) for a in results]
+
+    results = steps()
+    # The inputs are not modified.
+    assert_array_equal(_to_numpy(xp_name, centers_xp), centers)
+    assert_array_equal(_to_numpy(xp_name, weight_ema_xp), weight_ema.astype(np.float32))
+    monkeypatch.setattr(_array_api, "_use_mps_kernels", lambda xp, X: False)
+    expected = steps()
+
+    assert_array_equal(results[0][0], centers[0])
+    for array, expected_array in zip(results, expected):
+        if expected_array is None:
+            assert array is None
+        else:
+            assert_allclose(array, expected_array, rtol=1e-4, atol=1e-4)
+
+
+def test_mps_kernels_only_for_low_dimensional_data(xp_name, device):
+    xp = _xp(xp_name)
+    for n_features, expected in [(32, device == "mps"), (33, False)]:
+        X_xp = _to_device(xp_name, device, _blobs(n_features=n_features))
+        assert _array_api._use_mps_kernels(xp, X_xp) == expected

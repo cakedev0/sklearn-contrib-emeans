@@ -386,7 +386,12 @@ def _torch_emeans_steps(
         start, stop = s * batch_size, min((s + 1) * batch_size, n_rows)
         X_batch = X.index_select(0, rows[start:stop])
         bias = torch.linalg.vecdot(centers, centers).mul_(-0.5)
-        labels = torch.nn.functional.linear(X_batch, centers, bias).argmax(dim=1)
+        # Large batches go by chunks, see `_MAX_SCORES_SIZE`.
+        labels = [
+            torch.nn.functional.linear(X_batch[chunk], centers, bias).argmax(dim=1)
+            for chunk in _chunks(stop - start, n_clusters)
+        ]
+        labels = labels[0] if len(labels) == 1 else torch.cat(labels)
         sums.zero_().index_add_(0, labels, X_batch)
         counts.zero_().index_add_(0, labels, ones[: stop - start])
         if epoch_sums is not None:

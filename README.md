@@ -82,21 +82,6 @@ emeans.cluster_centers_  # a tensor on the device of X
   data to the host.
 - Only dense inputs.
 
-For example, with the default 5 epochs and `init="random"`, on float32 blobs,
-against the same fit on the CPU cores of the same machine:
-
-| | 1M × 128, 1024 clusters | 300k × 512, 1024 clusters | 2M × 16, 256 clusters |
-| --- | ---: | ---: | ---: |
-| MacBook Pro M2 (4 + 4 cores), PyTorch MPS | 1.20 s (6.1x) | 1.10 s (9.2x) | 0.99 s (1.7x) |
-| Core Ultra 9 285 (24 cores), Arc B580, PyTorch XPU | 0.33 s (3.7x) | 0.25 s (5.4x) | 0.43 s (1.0x) |
-| Core Ultra X7 358H (16 cores), integrated GPU, PyTorch XPU | 0.69 s (2.8x) | 0.53 s (6.1x) | 0.55 s (1.1x) |
-| AWS VM (8 vCPUs), NVIDIA L4, PyTorch CUDA | 0.41 s (13.6x) | 0.31 s (17.9x) | 0.77 s (1.4x) |
-| AWS VM (8 vCPUs), NVIDIA L4, CuPy | 0.59 s (9.1x) | 0.39 s (14.3x) | 0.73 s (1.5x) |
-
-The GPU pays off when the matrix products dominate. On low-dimensional data,
-the batches are small and each step is bound by the launch of the GPU kernels:
-with 3 features, the fit is 2 to 3 times faster on the CPU.
-
 ## Algorithm
 
 The algorithm is described in:
@@ -118,23 +103,17 @@ transposed centers.
 
 ## Performance
 
-On one socket of a Xeon 6787P with 43 threads, on float32 blobs, `EMeans`
-with the default 5 epochs fits 6-17x faster than `KMeans(n_init=1)` for the
-same or lower inertia. For example, 1M samples x 128 features with 1024
-clusters take 0.70 s against 5.2 s. See
-[cakedev0/scikit-learn#46](https://github.com/cakedev0/scikit-learn/pull/46)
-for the full benchmark, which uses the same kernel.
+You can use the GPU in a laptop or desktop to speed up `EMeans`, including
+Apple GPUs and Intel integrated or Arc GPUs. In tests on synthetic data with
+128 or 512 features, these GPUs were about 3–9x faster than the CPU in the
+same machine, using PyTorch with the default 5 epochs. With only a few
+features, the CPU can be faster: on data with 3 features, CPU was 2–3x faster.
 
-On sparse input, with 22 threads on 22 cores of the same Xeon (one NUMA node,
-with SMT siblings), `EMeans` fits 10-40x faster than `KMeans(n_init=1)`
-(scikit-learn 1.10.dev0) on the TF-IDF of 20 newsgroups and on RCV1 (float32,
-20 or 100 clusters), with an inertia within 0.2%. For example, RCV1 (804k
-samples x 47k features, density 0.16%) with 100 clusters takes 1.2 s against
-48 s. See [#3](https://github.com/cakedev0/sklearn-contrib-emeans/pull/3).
-
-The best batch size depends on the dataset: on some datasets, batches 4x
-smaller or larger than the scaling law's give a lower inertia for the same
-fit time. A `batch_size` parameter may come later.
+On a high-end Intel server, `EMeans` with the default 5 epochs was 6–17x
+faster than scikit-learn's `KMeans(n_init=1)` on synthetic data, with equally
+good or better clustering. On sparse text data, it was 10–40x faster with
+nearly the same clustering quality. See the
+[benchmarks](https://pr-187.sklbench-dashboard-preview.pages.dev/kmeans_pareto) for details.
 
 ## Relation to scikit-learn
 

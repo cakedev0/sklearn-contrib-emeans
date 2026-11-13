@@ -68,7 +68,7 @@ jobs:
       - name: Install the array API libraries
         if: matrix.array-api
         run: |
-          pip install array-api-compat array-api-strict
+          pip install array-api-strict
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           # Needed by scikit-learn to dispatch on array API inputs. Without
           # it, the array API tests are skipped.

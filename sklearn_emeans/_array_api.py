@@ -18,26 +18,12 @@ from functools import cache
 import numpy as np
 import scipy.sparse as sp
 from sklearn import get_config
+from sklearn.externals import array_api_compat
 
 # Upper bound on the number of elements of the (n_rows, n_clusters) scores of
 # a chunk of rows: 64 MB in float32. Larger chunks are not faster on the GPUs
 # we tried, and up to 1.7x slower with PyTorch on Apple GPUs.
 _MAX_SCORES_SIZE = 2**24
-
-
-def _array_api_compat():
-    try:
-        import array_api_compat
-    except ImportError:
-        try:
-            # Vendored by scikit-learn >= 1.7.
-            from sklearn.externals import array_api_compat
-        except ImportError as exc:
-            raise ImportError(
-                "array-api-compat is required to fit EMeans on array API inputs: "
-                "`pip install array-api-compat`."
-            ) from exc
-    return array_api_compat
 
 
 def get_namespace(X):
@@ -51,22 +37,21 @@ def get_namespace(X):
         return None
     if isinstance(X, (np.ndarray, np.generic, list, tuple)) or sp.issparse(X):
         return None
-    compat = _array_api_compat()
-    if not compat.is_array_api_obj(X) or compat.is_numpy_array(X):
+    if not array_api_compat.is_array_api_obj(X) or array_api_compat.is_numpy_array(X):
         return None
-    return compat.array_namespace(X)
+    return array_api_compat.array_namespace(X)
 
 
 def device(X):
-    return _array_api_compat().device(X)
+    return array_api_compat.device(X)
 
 
 def _is_torch(xp):
-    return _array_api_compat().is_torch_namespace(xp)
+    return array_api_compat.is_torch_namespace(xp)
 
 
 def _is_cupy(xp):
-    return _array_api_compat().is_cupy_namespace(xp)
+    return array_api_compat.is_cupy_namespace(xp)
 
 
 def to_numpy(xp, array):

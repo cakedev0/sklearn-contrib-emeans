@@ -73,9 +73,6 @@ with sklearn.config_context(array_api_dispatch=True):
 emeans.cluster_centers_  # a tensor on the device of X
 ```
 
-It needs [array-api-compat](https://pypi.org/project/array-api-compat/), or
-scikit-learn >= 1.7, which bundles it.
-
 - The random numbers are drawn on the host, in the same order as for NumPy
   inputs: from the same `random_state`, the results are the same up to
   rounding. On devices without float64 (Apple GPUs), all the computations are

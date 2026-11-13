@@ -725,7 +725,7 @@ class EMeans(
         if not isinstance(centers, np.ndarray):
             # Fitted on an array API input.
             centers = _array_api.to_numpy(
-                _array_api._array_api_compat().array_namespace(centers), centers
+                _array_api.array_api_compat.array_namespace(centers), centers
             )
         return X, None, np.ascontiguousarray(centers, dtype=X.dtype)
 

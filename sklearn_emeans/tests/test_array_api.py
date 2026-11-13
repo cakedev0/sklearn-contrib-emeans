@@ -1,6 +1,6 @@
 """Tests of EMeans on array API inputs.
 
-They need array-api-compat and `SCIPY_ARRAY_API=1` in the environment, and run
+They need `SCIPY_ARRAY_API=1` in the environment, and run
 on the namespaces and devices that are available: array-api-strict, PyTorch
 (CPU, CUDA, MPS, XPU) and CuPy.
 """
@@ -15,7 +15,6 @@ from sklearn_emeans import EMeans, _array_api
 from sklearn_emeans._emeans import _revive_dead_clusters
 from sklearn_emeans.tests.test_emeans import _reference_step
 
-pytest.importorskip("array_api_compat")
 try:
     with sklearn.config_context(array_api_dispatch=True):
         pass
@@ -58,9 +57,7 @@ pytestmark = pytest.mark.parametrize("xp_name, device", _namespaces_and_devices(
 
 
 def _xp(xp_name):
-    import array_api_compat
-
-    return array_api_compat.array_namespace(
+    return _array_api.array_api_compat.array_namespace(
         pytest.importorskip(xp_name).asarray(np.zeros(1, dtype=np.float32))
     )
 
@@ -145,7 +142,7 @@ def test_fit_float32(xp_name, device, init):
 
     # The outputs are in the namespace and on the device of the input.
     for array in (emeans.cluster_centers_, emeans.labels_, labels):
-        assert _array_api._array_api_compat().array_namespace(array) is xp
+        assert _array_api.array_api_compat.array_namespace(array) is xp
         assert _array_api.device(array) == _array_api.device(X_xp)
     assert emeans.cluster_centers_.dtype == xp.float32
     assert emeans.cluster_centers_.shape == (20, 10)

@@ -7,6 +7,8 @@
 set -euo pipefail
 
 check() {
+    # grep reads all the output of nm: stopping early (grep -q) breaks the pipe
+    # and fails the script.
     local weak
     weak="$(nm -gUm "$1" | grep "weak external" || true)"
     if [[ -n "$weak" ]]; then
@@ -15,7 +17,7 @@ check() {
         exit 1
     fi
     # The symbol that libomp 11 lacks, as a check that nm lists the exports.
-    nm -gU "$1" | grep -q "___kmpc_dispatch_deinit"
+    nm -gU "$1" | grep "___kmpc_dispatch_deinit" > /dev/null
     echo "$2: no weak symbol exported"
 }
 

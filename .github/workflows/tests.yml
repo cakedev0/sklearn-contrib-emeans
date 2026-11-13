@@ -25,7 +25,7 @@ jobs:
       - run: pre-commit run --all-files --show-diff-on-failure
 
   test:
-    name: ${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.min-deps && ', minimum dependencies' || '' }}${{ matrix.sklearn-nightly && ', scikit-learn nightly' || '' }}
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.min-deps && ', minimum dependencies' || '' }}${{ matrix.sklearn-nightly && ', scikit-learn nightly' || '' }}${{ matrix.array-api && ', array API' || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -39,6 +39,9 @@ jobs:
           - os: ubuntu-latest
             python: "3.14"
             sklearn-nightly: true
+          - os: ubuntu-latest
+            python: "3.13"
+            array-api: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -62,6 +65,15 @@ jobs:
         if: matrix.sklearn-nightly
         run: pip install --pre --extra-index-url https://pypi.anaconda.org/scientific-python-nightly-wheels/simple scikit-learn
 
+      - name: Install the array API libraries
+        if: matrix.array-api
+        run: |
+          pip install array-api-strict
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # Needed by scikit-learn to dispatch on array API inputs. Without
+          # it, the array API tests are skipped.
+          echo "SCIPY_ARRAY_API=1" >> "$GITHUB_ENV"
+
       - name: Install
         run: pip install -v ".[test]"
 
@@ -77,3 +89,8 @@ jobs:
       - name: Test
         working-directory: ${{ runner.temp }}
         run: pytest --pyargs sklearn_emeans --doctest-modules -v -p no:cacheprovider
+
+      - name: Check that the array API tests ran
+        if: matrix.array-api
+        working-directory: ${{ runner.temp }}
+        run: pytest --pyargs sklearn_emeans.tests.test_array_api -q -p no:cacheprovider -k "torch or strict" | grep -E "[0-9]+ passed"

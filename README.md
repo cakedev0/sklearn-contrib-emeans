@@ -53,6 +53,50 @@ The input can be dense or a sparse CSR matrix (other sparse formats are
 converted to CSR), in float32 or float64 (float32 is faster). There is no
 `sample_weight` yet.
 
+## GPU and array API inputs
+
+`EMeans` also fits on PyTorch tensors and CuPy arrays (and on the arrays of
+other libraries that follow the [array API](https://data-apis.org/array-api/)),
+on their device. As for the scikit-learn estimators, this must be
+[enabled](https://scikit-learn.org/stable/modules/array_api.html) with
+`array_api_dispatch=True`, and with `SCIPY_ARRAY_API=1` in the environment:
+
+```python
+import sklearn
+import torch
+from sklearn_emeans import EMeans
+
+X = torch.asarray(X_numpy, device="mps")  # or "cuda", "xpu"
+with sklearn.config_context(array_api_dispatch=True):
+    emeans = EMeans(n_clusters=1024).fit(X)
+    labels = emeans.predict(X)
+emeans.cluster_centers_  # a tensor on the device of X
+```
+
+- The random numbers are drawn on the host, in the same order as for NumPy
+  inputs: from the same `random_state`, the results are the same up to
+  rounding. On devices without float64 (Apple GPUs), all the computations are
+  in float32.
+- With `init="k-means||"`, the sampling rounds run on the device and the final
+  k-means++ on the candidates runs on the host. `init="k-means++"` copies the
+  data to the host.
+- Only dense inputs.
+
+For example, with the default 5 epochs and `init="random"`, on float32 blobs,
+against the same fit on the CPU cores of the same machine:
+
+| | 1M × 128, 1024 clusters | 300k × 512, 1024 clusters | 2M × 16, 256 clusters |
+| --- | ---: | ---: | ---: |
+| MacBook Pro M2 (4 + 4 cores), PyTorch MPS | 1.20 s (6.1x) | 1.10 s (9.2x) | 0.99 s (1.7x) |
+| Core Ultra 9 285 (24 cores), Arc B580, PyTorch XPU | 0.33 s (3.7x) | 0.25 s (5.4x) | 0.43 s (1.0x) |
+| Core Ultra X7 358H (16 cores), integrated GPU, PyTorch XPU | 0.69 s (2.8x) | 0.53 s (6.1x) | 0.55 s (1.1x) |
+| AWS VM (8 vCPUs), NVIDIA L4, PyTorch CUDA | 0.41 s (13.6x) | 0.31 s (17.9x) | 0.77 s (1.4x) |
+| AWS VM (8 vCPUs), NVIDIA L4, CuPy | 0.59 s (9.1x) | 0.39 s (14.3x) | 0.73 s (1.5x) |
+
+The GPU pays off when the matrix products dominate. On low-dimensional data,
+the batches are small and each step is bound by the launch of the GPU kernels:
+with 3 features, the fit is 2 to 3 times faster on the CPU.
+
 ## Algorithm
 
 The algorithm is described in:

@@ -15,13 +15,20 @@ py.extension_module(
 )
 
 py.install_sources(
-  ['__init__.py', '_emeans.py', '_kmeans_parallel.py', '_kmeans_plusplus.py'],
+  [
+    '__init__.py',
+    '_array_api.py',
+    '_emeans.py',
+    '_kmeans_parallel.py',
+    '_kmeans_plusplus.py',
+  ],
   subdir: 'sklearn_emeans',
 )
 
 py.install_sources(
   [
     'tests/__init__.py',
+    'tests/test_array_api.py',
     'tests/test_common.py',
     'tests/test_emeans.py',
     'tests/test_kmeans_plusplus.py',

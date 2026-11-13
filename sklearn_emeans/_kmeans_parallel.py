@@ -79,7 +79,6 @@ def _kmeans_parallel_candidates(X, n_clusters, random_state, n_threads):
     (as an array of dtype X.dtype).
     """
     n_samples = X.shape[0]
-    oversampling = _KMEANS_PARALLEL_OVERSAMPLING * n_clusters
     update_min_distances = (
         _update_min_distances_sparse if sp.issparse(X) else _update_min_distances
     )
@@ -108,22 +107,42 @@ def _kmeans_parallel_candidates(X, n_clusters, random_state, n_threads):
 
     add_candidates(np.array([random_state.randint(n_samples)], dtype=np.intp))
     for _ in range(_KMEANS_PARALLEL_N_ROUNDS):
-        total = min_distances.sum(dtype=np.float64)
-        if total == 0:
+        new = _sample_candidates(min_distances, n_clusters, random_state)
+        if new is None:
             break
-        # x is sampled with probability min(1, l * d²(x) / sum(d²))
-        uniform = random_state.uniform(size=n_samples)
-        new = np.flatnonzero(uniform * total < oversampling * min_distances)
         if len(new):
             add_candidates(new)
 
     if n_candidates < n_clusters:
-        # Too few candidates, e.g. when many samples are duplicates or when
-        # n_clusters is close to n_samples: complete with uniform samples.
-        others = np.setdiff1d(np.arange(n_samples), np.concatenate(candidates))
         add_candidates(
-            random_state.choice(others, size=n_clusters - n_candidates, replace=False)
+            _complete_candidates(n_samples, candidates, n_clusters, random_state)
         )
 
     weights = np.bincount(labels, minlength=n_candidates).astype(X.dtype)
     return np.concatenate(candidates), weights
+
+
+def _sample_candidates(min_distances, n_clusters, random_state):
+    """Indices of the candidates of a sampling round.
+
+    Each sample x is sampled with probability `min(1, l * d²(x) / sum(d²))`.
+    Returns None if all the distances are zero: there is nothing left to
+    sample.
+    """
+    oversampling = _KMEANS_PARALLEL_OVERSAMPLING * n_clusters
+    total = min_distances.sum(dtype=np.float64)
+    if total == 0:
+        return None
+    uniform = random_state.uniform(size=len(min_distances))
+    return np.flatnonzero(uniform * total < oversampling * min_distances)
+
+
+def _complete_candidates(n_samples, candidates, n_clusters, random_state):
+    """Uniform samples to get `n_clusters` candidates when the rounds gave fewer.
+
+    That happens e.g. when many samples are duplicates or when n_clusters is
+    close to n_samples.
+    """
+    n_candidates = sum(len(indices) for indices in candidates)
+    others = np.setdiff1d(np.arange(n_samples), np.concatenate(candidates))
+    return random_state.choice(others, size=n_clusters - n_candidates, replace=False)

@@ -22,6 +22,7 @@ from sklearn.utils.extmath import row_norms
 from sklearn.utils.validation import check_is_fitted, validate_data
 from threadpoolctl import ThreadpoolController
 
+from sklearn_emeans import _array_api
 from sklearn_emeans._kernels import (
     _chunk_size,
     _emeans_steps,
@@ -173,11 +174,25 @@ def _revive_dead_clusters(centers, weight_ema, random_state):
 
     Returns the number of revived clusters.
     """
+    indices = _revival_indices(weight_ema, random_state)
+    if indices is None:
+        return 0
+    dead_indices, donor_indices = indices
+    centers[dead_indices], centers[donor_indices] = _split_centers(
+        centers[donor_indices]
+    )
+    weight_ema[donor_indices] /= 2
+    weight_ema[dead_indices] = weight_ema[donor_indices]
+    return len(dead_indices)
+
+
+def _revival_indices(weight_ema, random_state):
+    """Indices of the dead clusters to revive and of their donors, or None."""
     dead = weight_ema < _DEAD_CLUSTER_THRESHOLD * weight_ema.mean()
     donors = ~dead & (weight_ema > 0)
     n_revived = min(np.count_nonzero(dead), np.count_nonzero(donors))
     if n_revived == 0:
-        return 0
+        return None
 
     # Gumbel top-k trick: the n_revived largest log(w) + Gumbel noise are a
     # sample without replacement with probabilities proportional to w.
@@ -186,25 +201,24 @@ def _revive_dead_clusters(centers, weight_ema, random_state):
     keys[donors] = np.log(weight_ema[donors]) - np.log(-np.log(uniform[donors]))
     donor_indices = np.argsort(keys)[::-1][:n_revived]
     dead_indices = np.flatnonzero(dead)[:n_revived]
+    return dead_indices, donor_indices
 
-    offset = np.full(centers.shape[1], _SPLIT_EPSILON, dtype=centers.dtype)
+
+def _split_centers(donor_centers):
+    """The two halves of each donor center: for the dead cluster and the donor."""
+    offset = np.full(donor_centers.shape[1], _SPLIT_EPSILON, dtype=donor_centers.dtype)
     offset[1::2] *= -1
-    donor_centers = centers[donor_indices]
-    centers[dead_indices] = donor_centers * (1 + offset)
-    centers[donor_indices] = donor_centers * (1 - offset)
+    dead_centers = donor_centers * (1 + offset)
+    donor_centers = donor_centers * (1 - offset)
 
     # A null center would give two identical halves: separate them along the
     # first feature.
-    same = (centers[dead_indices] == centers[donor_indices]).all(axis=1)
+    same = (dead_centers == donor_centers).all(axis=1)
     if same.any():
-        same_indices = dead_indices[same]
-        centers[same_indices, 0] = np.nextafter(
-            centers[same_indices, 0], centers.dtype.type(np.inf)
+        dead_centers[same, 0] = np.nextafter(
+            dead_centers[same, 0], donor_centers.dtype.type(np.inf)
         )
-
-    weight_ema[donor_indices] /= 2
-    weight_ema[dead_indices] = weight_ema[donor_indices]
-    return n_revived
+    return dead_centers, donor_centers
 
 
 class EMeans(
@@ -224,6 +238,10 @@ class EMeans(
     epochs, so that the number of epochs is the only parameter to choose.
 
     The input can be dense or a sparse CSR matrix, in float32 or float64.
+
+    With `sklearn.set_config(array_api_dispatch=True)`, dense array API inputs
+    (PyTorch tensors, CuPy arrays...) are fitted on their device, e.g. a GPU,
+    and the fitted attributes are arrays of the same library on that device.
 
     Parameters
     ----------
@@ -310,6 +328,13 @@ class EMeans(
     center during the last epoch. `labels_` and `inertia_` are then computed
     with an extra pass over the data, so that they match the final centers.
 
+    For array API inputs, the Cython kernels are replaced by array operations
+    of the library of the input. The random numbers are drawn on the host in
+    the same order, so the results are the same up to rounding. On devices
+    without float64, the EMA weights and the sums of the last epoch are in
+    float32. With `init="k-means||"`, the final k-means++ on the candidates
+    runs on the host, and `init="k-means++"` copies the data to the host.
+
     References
     ----------
     .. [1] S. Bessa, P.-E. Mazaré, G. Szilvasy, H. Touvron, D. Picard,
@@ -369,15 +394,19 @@ class EMeans(
                     "init must be 'random', 'k-means++', 'k-means||', a callable "
                     f"or an array-like, got {self.init!r}."
                 )
-        elif not callable(self.init) and not hasattr(self.init, "__len__"):
+        elif not callable(self.init) and not (
+            hasattr(self.init, "__len__") or hasattr(self.init, "shape")
+        ):
             raise ValueError(
                 "init must be 'random', 'k-means++', 'k-means||', a callable "
                 f"or an array-like, got {self.init!r}."
             )
 
-    def _check_centers(self, centers, X):
+    def _check_centers(self, centers, X, dtype=None):
         """Validate initial centers given as an array or by a callable."""
-        centers = check_array(centers, dtype=X.dtype, copy=True, order="C")
+        centers = check_array(
+            centers, dtype=X.dtype if dtype is None else dtype, copy=True, order="C"
+        )
         if centers.shape[0] != self.n_clusters:
             raise ValueError(
                 f"The shape of the initial centers {centers.shape} does not "
@@ -447,6 +476,9 @@ class EMeans(
             Fitted estimator.
         """
         self._check_params()
+        xp = _array_api.get_namespace(X)
+        if xp is not None:
+            return self._fit_array_api(xp, X)
         X = validate_data(
             self,
             X,
@@ -537,7 +569,150 @@ class EMeans(
         self.batch_size_ = batch_size
         return self
 
+    def _validate_array_api(self, xp, X, reset):
+        """Validate an array API input, kept on its device."""
+        if _array_api.dtype_name(xp, X) is None:
+            # Not all the devices have float64.
+            X = xp.astype(
+                X, getattr(xp, _array_api.accumulator_dtype(xp, _array_api.device(X)))
+            )
+        return validate_data(
+            self, X, dtype=[xp.float64, xp.float32], order="C", reset=reset
+        )
+
+    def _init_centers_array_api(self, xp, X, random_state):
+        """Initial centers of an array API input, on its device."""
+        dtype = _array_api.dtype_name(xp, X)
+        device = _array_api.device(X)
+        if isinstance(self.init, str) and self.init == "random":
+            # Same draw as for NumPy inputs.
+            n_samples = X.shape[0]
+            weights = np.ones(n_samples, dtype=dtype)
+            seeds = random_state.choice(
+                n_samples,
+                size=self.n_clusters,
+                replace=False,
+                p=weights / weights.sum(),
+            )
+            return xp.take(X, _array_api.index_array(xp, seeds, device), axis=0)
+        if isinstance(self.init, str) and self.init == "k-means||":
+            with _threadpool_controller().limit(limits=1, user_api="blas"):
+                centers = _array_api.kmeans_parallel(
+                    xp, X, self.n_clusters, random_state, _openmp_effective_n_threads()
+                )
+        elif isinstance(self.init, str):
+            # The greedy k-means++ only runs on the host.
+            centers = self._init_centers(_array_api.to_numpy(xp, X), random_state)
+        else:
+            centers = self.init
+            if callable(centers):
+                centers = centers(X, self.n_clusters, random_state=random_state)
+            if _array_api.get_namespace(centers) is not None:
+                centers = _array_api.to_numpy(
+                    _array_api.get_namespace(centers), centers
+                )
+            centers = self._check_centers(centers, X, dtype=dtype)
+        return _array_api.from_numpy(xp, centers, dtype, device)
+
+    def _fit_array_api(self, xp, X):
+        """Fit on an array API input, on its device.
+
+        Same algorithm and same random numbers as in `fit`, with the array
+        operations of `_array_api.py` in place of the Cython kernels.
+        """
+        X = self._validate_array_api(xp, X, reset=True)
+        n_samples, n_features = X.shape
+        n_clusters = self.n_clusters
+        if n_samples < n_clusters:
+            raise ValueError(
+                f"n_samples={n_samples} should be >= n_clusters={n_clusters}."
+            )
+        random_state = check_random_state(self.random_state)
+        device = _array_api.device(X)
+        acc_dtype = getattr(xp, _array_api.accumulator_dtype(xp, device))
+
+        centers = self._init_centers_array_api(xp, X, random_state)
+
+        batch_size = _resolve_batch_size(
+            n_samples, n_clusters, n_features, self.n_epochs
+        )
+        initial_step_size = _resolve_initial_step_size(
+            n_samples, n_clusters, self.n_epochs, batch_size
+        )
+        epochs_n_rows = _epochs_n_rows(n_samples, self.n_epochs)
+        n_steps = sum(math.ceil(n_rows / batch_size) for n_rows in epochs_n_rows)
+        revival = n_features > _NO_REVIVAL_MAX_FEATURES
+
+        weight_ema = xp.full(n_clusters, _INIT_WEIGHT, dtype=acc_dtype, device=device)
+        epoch_sums = epoch_counts = None
+        revive = partial(_array_api.revive_dead_clusters, xp, random_state=random_state)
+
+        step = 0
+        for epoch, n_rows in enumerate(epochs_n_rows):
+            if epoch == len(epochs_n_rows) - 1:
+                epoch_sums = xp.zeros(
+                    (n_clusters, n_features), dtype=acc_dtype, device=device
+                )
+                epoch_counts = xp.zeros(n_clusters, dtype=acc_dtype, device=device)
+            permutation = random_state.permutation(n_samples)[:n_rows]
+            n_epoch_steps = math.ceil(n_rows / batch_size)
+            step_sizes = [
+                _scheduled_step_size(initial_step_size, step + i, n_steps)
+                for i in range(n_epoch_steps)
+            ]
+            centers, weight_ema, epoch_sums, epoch_counts = _array_api.emeans_steps(
+                xp,
+                X,
+                _array_api.index_array(xp, permutation, device),
+                batch_size,
+                centers,
+                weight_ema,
+                step_sizes,
+                epoch_sums,
+                epoch_counts,
+                step,
+                _REVIVAL_PERIOD if revival else 0,
+                revive,
+            )
+            step += n_epoch_steps
+
+        # The final centers are the means of the last epoch's assignments.
+        # Centers that got no sample in the last epoch keep their EMA position.
+        assigned = epoch_counts > 0
+        safe_counts = xp.where(assigned, epoch_counts, xp.ones_like(epoch_counts))
+        centers = xp.where(
+            assigned[:, None],
+            xp.astype(epoch_sums / safe_counts[:, None], X.dtype),
+            centers,
+        )
+
+        self.cluster_centers_ = centers
+        self._n_features_out = n_clusters
+        self.labels_, self.inertia_ = _array_api.labels_inertia(xp, X, centers)
+        self.batch_size_ = batch_size
+        return self
+
     def _check_test_data(self, X):
+        """Validate X, and return its array namespace and the centers.
+
+        The centers are converted to the dtype of X, and moved to its
+        namespace and device if needed. The namespace is None for the inputs
+        that go through the Cython kernels.
+        """
+        centers = self.cluster_centers_
+        centers_xp = _array_api.get_namespace(centers)
+        xp = _array_api.get_namespace(X)
+        if xp is not None:
+            X = self._validate_array_api(xp, X, reset=False)
+            if centers_xp is not None and centers_xp is not xp:
+                centers = _array_api.to_numpy(centers_xp, centers)
+            if centers_xp is not xp:
+                centers = np.asarray(centers)
+            return (
+                X,
+                xp,
+                xp.asarray(centers, dtype=X.dtype, device=_array_api.device(X)),
+            )
         X = validate_data(
             self,
             X,
@@ -547,7 +722,12 @@ class EMeans(
             accept_large_sparse=False,
             reset=False,
         )
-        return X, self.cluster_centers_.astype(X.dtype, copy=False)
+        if not isinstance(centers, np.ndarray):
+            # Fitted on an array API input.
+            centers = _array_api.to_numpy(
+                _array_api.array_api_compat.array_namespace(centers), centers
+            )
+        return X, None, np.ascontiguousarray(centers, dtype=X.dtype)
 
     def predict(self, X):
         """Predict the closest cluster each sample in X belongs to.
@@ -563,7 +743,9 @@ class EMeans(
             Index of the cluster each sample belongs to.
         """
         check_is_fitted(self)
-        X, centers = self._check_test_data(X)
+        X, xp, centers = self._check_test_data(X)
+        if xp is not None:
+            return _array_api.labels_inertia(xp, X, centers)[0]
         labels, _ = _labels_inertia_threadpool_limit(
             X, centers, _openmp_effective_n_threads()
         )
@@ -586,7 +768,9 @@ class EMeans(
             X transformed in the new space.
         """
         check_is_fitted(self)
-        X, centers = self._check_test_data(X)
+        X, xp, centers = self._check_test_data(X)
+        if xp is not None:
+            return _array_api.euclidean_distances(xp, X, centers)
         return euclidean_distances(X, centers)
 
     def score(self, X, y=None):
@@ -606,7 +790,9 @@ class EMeans(
             Opposite of the value of X on the K-means objective.
         """
         check_is_fitted(self)
-        X, centers = self._check_test_data(X)
+        X, xp, centers = self._check_test_data(X)
+        if xp is not None:
+            return -_array_api.labels_inertia(xp, X, centers)[1]
         _, inertia = _labels_inertia_threadpool_limit(
             X, centers, _openmp_effective_n_threads()
         )

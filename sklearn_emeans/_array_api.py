@@ -64,6 +64,14 @@ def _use_mps_kernels(xp, X):
     return _mps_kernels.supports(X)
 
 
+def as_steps_input(xp, X):
+    """X as `emeans_steps` needs it, to convert it once and not at each call."""
+    if _use_mps_kernels(xp, X):
+        # The Metal kernels read the rows of X from a contiguous buffer.
+        return X.contiguous()
+    return X
+
+
 def to_numpy(xp, array):
     """Copy an array to the host."""
     if _is_torch(xp):

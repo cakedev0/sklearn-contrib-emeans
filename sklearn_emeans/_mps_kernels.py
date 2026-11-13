@@ -16,6 +16,7 @@ which only beats the matrix product of PyTorch on low-dimensional data: see
 
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
 from functools import cache
 
 # On an M2 with PyTorch 2.14, the kernels are 1.8x to 5x faster than the array
@@ -97,24 +98,34 @@ kernel void ema(
 
 @cache
 def _library(n_features):
-    """Compiled kernels for a number of features, None if it fails."""
+    """Compiled kernels for a number of features, None without them.
+
+    Without them, the steps fall back to array operations: silently for a
+    PyTorch without `compile_shader`, and with a warning (once per number of
+    features) if the source doesn't compile.
+    """
     import torch
 
+    if not hasattr(torch.mps, "compile_shader"):
+        return None
     try:
         return torch.mps.compile_shader(f"#define D {n_features}\n" + _SOURCE)
-    except Exception:
-        # PyTorch without `compile_shader`, or a Metal version that rejects
-        # the source: fall back to array operations.
+    except Exception as exc:
+        warnings.warn(
+            "The Metal kernels of sklearn_emeans could not be compiled: the fit "
+            "falls back to array operations, which are slower on "
+            f"low-dimensional data. Please report this error: {exc!r}",
+            RuntimeWarning,
+        )
         return None
 
 
 def supports(X):
-    """Whether the kernels can run on the PyTorch tensor X."""
+    """Whether the kernels can run on X, a PyTorch tensor on an Apple GPU."""
     import torch
 
     return (
-        X.device.type == "mps"
-        and X.dtype == torch.float32
+        X.dtype == torch.float32
         and X.ndim == 2
         and 0 < X.shape[1] <= MAX_FEATURES
         and X.shape[0] < 2**32
@@ -188,6 +199,4 @@ def emeans_steps(
         if revival_period > 0 and (first_step + s + 1) % revival_period == 0:
             centers, weight_ema = revive(centers, weight_ema)
             centers = centers.contiguous()
-            if weight_ema is new_weight_ema:
-                new_weight_ema = torch.empty_like(weight_ema)
     return centers, weight_ema, epoch_sums, epoch_counts

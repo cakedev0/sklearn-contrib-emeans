@@ -1,8 +1,8 @@
 # sklearn-contrib-emeans
 
 `EMeans` is a scikit-learn compatible implementation of e-means, a mini-batch
-k-means that reaches the inertia of `KMeans` in a few passes over the data
-instead of tens of iterations.
+k-means that typically gets close to the inertia of `KMeans` in a few passes
+over the data instead of tens of iterations.
 
 Each center is an exponential moving average (EMA) of the samples assigned to
 it, with a cosine schedule on the EMA step. The batch size and the initial step
@@ -94,10 +94,13 @@ fit time. A `batch_size` parameter may come later.
 
 ## Relation to scikit-learn
 
-This package is a step towards adding `EMeans` to scikit-learn itself, see
+This is an independent package, not affiliated with scikit-learn or
+[scikit-learn-contrib](https://github.com/scikit-learn-contrib). The plan is
+to submit it to scikit-learn-contrib soon.
+
+It is the place to collect feedback on `EMeans` and stabilize its API. Adding
+it to scikit-learn itself is under discussion in
 [scikit-learn#35383](https://github.com/scikit-learn/scikit-learn/issues/35383).
-The plan is to collect feedback and stabilize the API here, then move it to
-`sklearn.cluster` for scikit-learn 1.11.
 
 Feedback is welcome in the issues, especially on datasets where `EMeans` does
 worse than `KMeans`.

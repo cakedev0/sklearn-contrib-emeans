@@ -215,8 +215,8 @@ class EMeans(
     E-means is a mini-batch variant of K-means where each center is an
     exponential moving average (EMA) of the samples assigned to it. The EMA
     step size decreases along a cosine schedule, and clusters that receive
-    too few samples are revived by splitting heavier ones. It typically
-    reaches the inertia of :class:`~sklearn.cluster.KMeans` in a few passes
+    too few samples are revived by splitting heavier ones. It typically gets
+    close to the inertia of :class:`~sklearn.cluster.KMeans` in a few passes
     over the data (epochs) instead of tens of iterations.
 
     The batch size and the initial step size are given by scaling laws fitted

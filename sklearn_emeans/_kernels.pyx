@@ -27,12 +27,18 @@ contiguous loop over the centers.
 `_update_min_distances` and `_update_min_distances_sparse` use the same
 assignment to update the distances of the samples to their nearest center, for
 the k-means|| initialization.
+
+`_greedy_stats` and `_greedy_stats_sparse` compute the statistics of the
+clusters for the greedy revival, with the same assignment and the same
+parallelism over centers. `_trial_splits` and `_trial_splits_sparse` then try
+to split some clusters in two, in parallel over these clusters.
 """
 
 from cython cimport floating
 from cython.parallel cimport parallel, prange
 from cpython.exc cimport PyErr_CheckSignals
 from cpython.ref cimport PyObject
+from libc.math cimport INFINITY
 from libc.stdlib cimport calloc, malloc, free
 from libc.string cimport memcpy, memset
 from scipy.linalg.cython_blas cimport sgemm, dgemm
@@ -1176,3 +1182,645 @@ cdef inline void _ema_update(
     for k in range(n_features):
         center[k] = <floating> (center_coef * center[k] + sums_coef * sums[k])
     weight_ema[0] = new_weight
+
+
+def _greedy_stats(
+    const floating[:, ::1] X,        # IN
+    const floating[:, ::1] centers,  # IN
+    int[::1] labels,                 # OUT (n_samples,)
+    intp_t[::1] order,               # OUT (n_samples,)
+    intp_t[::1] cluster_starts,      # OUT (n_clusters + 1,)
+    double[::1] cost,                # OUT (n_clusters,)
+    double[::1] max_scatter,         # OUT (n_clusters,)
+    intp_t[::1] feature,             # OUT (n_clusters,)
+    int n_threads,
+):
+    """Statistics of the clusters for the greedy revival.
+
+    Assigns each sample to its nearest center, then computes for each cluster:
+
+    - `cost`: the increase of the inertia when its samples go to their second
+      nearest center;
+    - `max_scatter` and `feature`: the largest sum of squared deviations to
+      the mean of its samples along one feature, and this feature.
+
+    The samples of the cluster j are
+    `order[cluster_starts[j]:cluster_starts[j + 1]]`, in increasing order.
+    The results don't depend on the number of threads.
+    """
+    cdef:
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t chunk_idx, start, j
+        floating *centers_squared_norms
+        floating *distances = NULL
+        double *gaps
+        double *sums = NULL
+
+    gaps = <double*> malloc(max(n_samples, 1) * sizeof(double))
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+
+    with nogil:
+        for j in range(n_clusters):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+
+        with parallel(num_threads=max(1, min(n_threads, n_chunks))):
+            distances = <floating*> malloc(CHUNK_SIZE * n_clusters * sizeof(floating))
+
+            for chunk_idx in prange(n_chunks, schedule='static'):
+                start = chunk_idx * CHUNK_SIZE
+                _two_nearest_rows(
+                    &X[start, 0],
+                    min(CHUNK_SIZE, n_samples - start),
+                    &centers[0, 0],
+                    centers_squared_norms,
+                    n_clusters,
+                    n_features,
+                    &labels[start],
+                    distances,
+                    &gaps[start],
+                )
+
+            free(distances)
+
+        _sort_rows_by_label(&labels[0], n_samples, n_clusters,
+                            &cluster_starts[0], &order[0])
+
+        with parallel(num_threads=n_threads):
+            sums = <double*> malloc(2 * n_features * sizeof(double))
+
+            for j in prange(n_clusters, schedule='dynamic'):
+                _cluster_scatter(
+                    &X[0, 0] if n_samples > 0 else NULL,
+                    n_features,
+                    &order[0] + cluster_starts[j],
+                    cluster_starts[j + 1] - cluster_starts[j],
+                    &centers[j, 0],
+                    gaps,
+                    sums,
+                    &cost[j],
+                    &max_scatter[j],
+                    &feature[j],
+                )
+
+            free(sums)
+
+    free(gaps)
+    free(centers_squared_norms)
+
+
+def _greedy_stats_sparse(
+    X,                               # IN
+    const floating[:, ::1] centers,  # IN
+    int[::1] labels,                 # OUT (n_samples,)
+    intp_t[::1] order,               # OUT (n_samples,)
+    intp_t[::1] cluster_starts,      # OUT (n_clusters + 1,)
+    double[::1] cost,                # OUT (n_clusters,)
+    double[::1] max_scatter,         # OUT (n_clusters,)
+    intp_t[::1] feature,             # OUT (n_clusters,)
+    int n_threads,
+):
+    """Same as `_greedy_stats`, with `X` a CSR matrix with int32 indices."""
+    cdef:
+        const floating[::1] X_data = X.data
+        const int[::1] X_indices = X.indices
+        const int[::1] X_indptr = X.indptr
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t chunk_idx, start, i, j
+        floating *centers_T
+        floating *centers_squared_norms
+        floating *distances = NULL
+        double *gaps
+        double *sums = NULL
+
+    gaps = <double*> malloc(max(n_samples, 1) * sizeof(double))
+    centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
+    centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+
+    with nogil:
+        for j in range(n_clusters):
+            centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
+
+        _transpose(&centers[0, 0], n_clusters, n_features, centers_T, n_threads)
+
+        with parallel(num_threads=max(1, min(n_threads, n_chunks))):
+            distances = <floating*> malloc(n_clusters * sizeof(floating))
+
+            for chunk_idx in prange(n_chunks, schedule='static'):
+                start = chunk_idx * CHUNK_SIZE
+                for i in range(start, min(start + CHUNK_SIZE, n_samples)):
+                    _sparse_row_distances(
+                        &X_data[0], &X_indices[0], &X_indptr[0], i, centers_T,
+                        centers_squared_norms, n_clusters, distances,
+                    )
+                    _two_nearest(distances, n_clusters, &labels[i], &gaps[i])
+
+            free(distances)
+
+        _sort_rows_by_label(&labels[0], n_samples, n_clusters,
+                            &cluster_starts[0], &order[0])
+
+        with parallel(num_threads=n_threads):
+            sums = <double*> malloc(2 * n_features * sizeof(double))
+
+            for j in prange(n_clusters, schedule='dynamic'):
+                _cluster_scatter_sparse(
+                    &X_data[0] if X_data.shape[0] > 0 else NULL,
+                    &X_indices[0] if X_indices.shape[0] > 0 else NULL,
+                    &X_indptr[0],
+                    n_features,
+                    &order[0] + cluster_starts[j],
+                    cluster_starts[j + 1] - cluster_starts[j],
+                    gaps,
+                    sums,
+                    &cost[j],
+                    &max_scatter[j],
+                    &feature[j],
+                )
+
+            free(sums)
+
+    free(gaps)
+    free(centers_T)
+    free(centers_squared_norms)
+
+
+cdef inline void _two_nearest(
+    const floating *distances,  # IN (n_clusters,)
+    intp_t n_clusters,
+    int *label,                 # OUT
+    double *gap,                # OUT
+) noexcept nogil:
+    """Nearest center, and how much further the second nearest one is.
+
+    The gap between the two squared distances is 0 for a single center.
+    """
+    cdef:
+        intp_t j, nearest = 0
+        floating dist
+        floating min_dist = distances[0]
+        floating second_dist = <floating> INFINITY
+
+    for j in range(1, n_clusters):
+        dist = distances[j]
+        if dist < min_dist:
+            second_dist = min_dist
+            min_dist = dist
+            nearest = j
+        elif dist < second_dist:
+            second_dist = dist
+    label[0] = <int> nearest
+    gap[0] = <double> second_dist - min_dist if n_clusters > 1 else 0.0
+
+
+cdef void _two_nearest_rows(
+    const floating *X_rows,                 # IN (n_rows, n_features)
+    intp_t n_rows,
+    const floating *centers,                # IN (n_clusters, n_features)
+    const floating *centers_squared_norms,  # IN (n_clusters,)
+    intp_t n_clusters,
+    intp_t n_features,
+    int *labels,                            # OUT (n_rows,)
+    floating *distances,                    # TMP (n_rows, n_clusters)
+    double *gaps,                           # OUT (n_rows,)
+) noexcept nogil:
+    """`_two_nearest` of the contiguous rows `X_rows`, with one GEMM."""
+    cdef intp_t r, j
+
+    for r in range(n_rows):
+        for j in range(n_clusters):
+            distances[r * n_clusters + j] = centers_squared_norms[j]
+
+    # distances = ||c||² - 2 x.c, as in `_assign_rows`.
+    _gemm_nt(n_rows, n_clusters, n_features, -2.0, X_rows, centers, 1.0,
+             distances)
+
+    for r in range(n_rows):
+        _two_nearest(&distances[r * n_clusters], n_clusters, &labels[r], &gaps[r])
+
+
+cdef inline void _sparse_row_distances(
+    const floating *X_data,                 # IN (nnz,)
+    const int *X_indices,                   # IN (nnz,)
+    const int *X_indptr,                    # IN (n_samples + 1,)
+    intp_t i,
+    const floating *centers_T,              # IN (n_features, n_clusters)
+    const floating *centers_squared_norms,  # IN (n_clusters,)
+    intp_t n_clusters,
+    floating *distances,                    # OUT (n_clusters,)
+) noexcept nogil:
+    """distances = ||c||² - 2 x.c for the CSR row i, as in `_assign_rows_sparse`."""
+    cdef:
+        intp_t p, j
+        floating minus_2x
+        const floating *c_k
+
+    for j in range(n_clusters):
+        distances[j] = centers_squared_norms[j]
+    for p in range(X_indptr[i], X_indptr[i + 1]):
+        minus_2x = -2 * X_data[p]
+        c_k = &centers_T[X_indices[p] * n_clusters]
+        for j in range(n_clusters):
+            distances[j] += minus_2x * c_k[j]
+
+
+cdef void _sort_rows_by_label(
+    const int *labels,       # IN (n_samples,)
+    intp_t n_samples,
+    intp_t n_clusters,
+    intp_t *cluster_starts,  # OUT (n_clusters + 1,)
+    intp_t *order,           # OUT (n_samples,)
+) noexcept nogil:
+    """Counting sort of all the rows by label, as in `_sort_by_label`."""
+    cdef intp_t i, j
+
+    memset(cluster_starts, 0, (n_clusters + 1) * sizeof(intp_t))
+    for i in range(n_samples):
+        cluster_starts[labels[i] + 1] += 1
+    for j in range(n_clusters):
+        cluster_starts[j + 1] += cluster_starts[j]
+    for i in range(n_samples):
+        order[cluster_starts[labels[i]]] = i
+        cluster_starts[labels[i]] += 1
+    for j in range(n_clusters, 0, -1):
+        cluster_starts[j] = cluster_starts[j - 1]
+    cluster_starts[0] = 0
+
+
+cdef inline void _max_scatter(
+    const double *sums,   # IN (2 * n_features,): sums, then sums of squares
+    intp_t n_features,
+    intp_t n_rows,
+    double *max_scatter,  # OUT
+    intp_t *feature,      # OUT
+) noexcept nogil:
+    """Largest sum of squared deviations to the mean along one feature."""
+    cdef:
+        intp_t k
+        double scatter
+
+    max_scatter[0] = 0.0
+    feature[0] = 0
+    if n_rows == 0:
+        return
+    for k in range(n_features):
+        scatter = sums[n_features + k] - sums[k] * sums[k] / n_rows
+        if scatter > max_scatter[0]:
+            max_scatter[0] = scatter
+            feature[0] = k
+
+
+cdef void _cluster_scatter(
+    const floating *X,       # IN (n_samples, n_features)
+    intp_t n_features,
+    const intp_t *rows,      # IN (n_rows,)
+    intp_t n_rows,
+    const floating *center,  # IN (n_features,)
+    const double *gaps,      # IN (n_samples,)
+    double *sums,            # TMP (2 * n_features,)
+    double *cost,            # OUT
+    double *max_scatter,     # OUT
+    intp_t *feature,         # OUT
+) noexcept nogil:
+    """Removal cost and largest scatter along one feature of a cluster.
+
+    The sums are those of the deviations to the center, which is near the
+    mean, for their accuracy.
+    """
+    cdef:
+        intp_t r, k
+        const floating *x
+        double diff, total = 0.0
+
+    memset(sums, 0, 2 * n_features * sizeof(double))
+    for r in range(n_rows):
+        total += gaps[rows[r]]
+        x = &X[rows[r] * n_features]
+        for k in range(n_features):
+            diff = <double> x[k] - center[k]
+            sums[k] += diff
+            sums[n_features + k] += diff * diff
+    cost[0] = total
+    _max_scatter(sums, n_features, n_rows, max_scatter, feature)
+
+
+cdef void _cluster_scatter_sparse(
+    const floating *X_data,  # IN (nnz,)
+    const int *X_indices,    # IN (nnz,)
+    const int *X_indptr,     # IN (n_samples + 1,)
+    intp_t n_features,
+    const intp_t *rows,      # IN (n_rows,)
+    intp_t n_rows,
+    const double *gaps,      # IN (n_samples,)
+    double *sums,            # TMP (2 * n_features,)
+    double *cost,            # OUT
+    double *max_scatter,     # OUT
+    intp_t *feature,         # OUT
+) noexcept nogil:
+    """Same as `_cluster_scatter` for CSR rows, with sums of the values."""
+    cdef:
+        intp_t r, p
+        double value, total = 0.0
+
+    memset(sums, 0, 2 * n_features * sizeof(double))
+    for r in range(n_rows):
+        total += gaps[rows[r]]
+        for p in range(X_indptr[rows[r]], X_indptr[rows[r] + 1]):
+            value = X_data[p]
+            sums[X_indices[p]] += value
+            sums[n_features + X_indices[p]] += value * value
+    cost[0] = total
+    _max_scatter(sums, n_features, n_rows, max_scatter, feature)
+
+
+def _trial_splits(
+    const floating[:, ::1] X,              # IN
+    const intp_t[::1] order,               # IN (n_samples,)
+    const intp_t[::1] cluster_starts,      # IN (n_clusters + 1,)
+    const intp_t[::1] clusters,            # IN (n_trials,)
+    const intp_t[::1] feature,             # IN (n_clusters,)
+    const double[::1] std,                 # IN (n_clusters,)
+    int n_iterations,
+    double[::1] gains,                     # OUT (n_trials,)
+    double[:, :, ::1] split_centers,       # OUT (n_trials, 2, n_features)
+    int n_threads,
+):
+    """2-means of the samples of some clusters, on a half of them.
+
+    The samples of the cluster j are
+    `order[cluster_starts[j]:cluster_starts[j + 1]]`. Its 2-means is fitted on
+    the samples at the even positions, with `n_iterations` iterations from
+    their mean moved by `std[j]` in both directions along `feature[j]`.
+    `gains` is the decrease of the inertia of the cluster, estimated on the
+    samples at the odd positions. Each cluster of `clusters` must have at
+    least 2 samples.
+    """
+    cdef:
+        intp_t n_trials = clusters.shape[0]
+        intp_t n_features = X.shape[1]
+        intp_t t, j
+        double *buffer = NULL
+
+    with nogil, parallel(num_threads=n_threads):
+        buffer = <double*> malloc(3 * n_features * sizeof(double))
+
+        for t in prange(n_trials, schedule='dynamic'):
+            j = clusters[t]
+            _trial_split(
+                &X[0, 0],
+                n_features,
+                &order[0] + cluster_starts[j],
+                cluster_starts[j + 1] - cluster_starts[j],
+                feature[j],
+                std[j],
+                n_iterations,
+                buffer,
+                &split_centers[t, 0, 0],
+                &gains[t],
+            )
+
+        free(buffer)
+
+
+def _trial_splits_sparse(
+    const floating[::1] X_data,            # IN (nnz,)
+    const int[::1] X_indices,              # IN (nnz,)
+    const int[::1] X_indptr,               # IN (n_samples + 1,)
+    intp_t n_features,
+    const intp_t[::1] order,               # IN (n_samples,)
+    const intp_t[::1] cluster_starts,      # IN (n_clusters + 1,)
+    const intp_t[::1] clusters,            # IN (n_trials,)
+    const intp_t[::1] feature,             # IN (n_clusters,)
+    const double[::1] std,                 # IN (n_clusters,)
+    int n_iterations,
+    double[::1] gains,                     # OUT (n_trials,)
+    double[:, :, ::1] split_centers,       # OUT (n_trials, 2, n_features)
+    int n_threads,
+):
+    """Same as `_trial_splits`, for a CSR matrix with int32 indices."""
+    cdef:
+        intp_t n_trials = clusters.shape[0]
+        intp_t t, j
+        double *buffer = NULL
+
+    with nogil, parallel(num_threads=n_threads):
+        buffer = <double*> malloc(3 * n_features * sizeof(double))
+
+        for t in prange(n_trials, schedule='dynamic'):
+            j = clusters[t]
+            _trial_split_sparse(
+                &X_data[0] if X_data.shape[0] > 0 else NULL,
+                &X_indices[0] if X_indices.shape[0] > 0 else NULL,
+                &X_indptr[0],
+                n_features,
+                &order[0] + cluster_starts[j],
+                cluster_starts[j + 1] - cluster_starts[j],
+                feature[j],
+                std[j],
+                n_iterations,
+                buffer,
+                &split_centers[t, 0, 0],
+                &gains[t],
+            )
+
+        free(buffer)
+
+
+cdef inline double _squared_distance_64(
+    const floating *x,
+    const double *y,
+    intp_t n_features,
+) noexcept nogil:
+    cdef:
+        double result = 0.0
+        double diff
+        intp_t k
+
+    for k in range(n_features):
+        diff = x[k] - y[k]
+        result += diff * diff
+    return result
+
+
+cdef inline double _sparse_squared_distance_64(
+    const floating *X_data,  # IN (nnz,)
+    const int *X_indices,    # IN (nnz,)
+    const int *X_indptr,     # IN (n_samples + 1,)
+    intp_t i,
+    const double *y,         # IN (n_features,)
+    double y_squared_norm,
+) noexcept nogil:
+    """||x - y||² for the CSR row i: ||y||² + sum_k ((x_k - y_k)² - y_k²)."""
+    cdef:
+        double result = y_squared_norm
+        double diff
+        intp_t p
+
+    for p in range(X_indptr[i], X_indptr[i + 1]):
+        diff = X_data[p] - y[X_indices[p]]
+        result += diff * diff - y[X_indices[p]] * y[X_indices[p]]
+    return result
+
+
+cdef inline double _squared_norm_of_double(
+    const double *x,
+    intp_t n_features,
+) noexcept nogil:
+    cdef:
+        double result = 0.0
+        intp_t k
+
+    for k in range(n_features):
+        result += x[k] * x[k]
+    return result
+
+
+cdef inline bint _update_split_centers(
+    const double *sums,  # IN (2, n_features)
+    intp_t n_features,
+    intp_t n_first,
+    intp_t n_second,
+    double *centers,     # INOUT (2, n_features)
+) noexcept nogil:
+    """Means of the two sides, unless one is empty. Returns whether it is."""
+    cdef intp_t k
+
+    if n_first == 0 or n_second == 0:
+        return True
+    for k in range(n_features):
+        centers[k] = sums[k] / n_first
+        centers[n_features + k] = sums[n_features + k] / n_second
+    return False
+
+
+cdef void _trial_split(
+    const floating *X,   # IN (n_samples, n_features)
+    intp_t n_features,
+    const intp_t *rows,  # IN (n_rows,)
+    intp_t n_rows,
+    intp_t feature,
+    double std,
+    int n_iterations,
+    double *buffer,      # TMP (3, n_features)
+    double *centers,     # OUT (2, n_features)
+    double *gain,        # OUT
+) noexcept nogil:
+    """2-means of the rows at the even positions, gain on the other ones."""
+    cdef:
+        double *mean = buffer
+        double *sums = buffer + n_features
+        intp_t n_fitted = (n_rows + 1) // 2
+        intp_t r, k, side, n_second
+        const floating *x
+        double whole = 0.0, split = 0.0
+
+    memset(mean, 0, n_features * sizeof(double))
+    for r in range(0, n_rows, 2):
+        x = &X[rows[r] * n_features]
+        for k in range(n_features):
+            mean[k] += x[k]
+    for k in range(n_features):
+        mean[k] /= n_fitted
+        centers[k] = mean[k]
+        centers[n_features + k] = mean[k]
+    centers[feature] += std
+    centers[n_features + feature] -= std
+
+    for _ in range(n_iterations):
+        memset(sums, 0, 2 * n_features * sizeof(double))
+        n_second = 0
+        for r in range(0, n_rows, 2):
+            x = &X[rows[r] * n_features]
+            side = (_squared_distance_64(x, centers, n_features)
+                    > _squared_distance_64(x, centers + n_features, n_features))
+            n_second += side
+            for k in range(n_features):
+                sums[side * n_features + k] += x[k]
+        if _update_split_centers(sums, n_features, n_fitted - n_second, n_second,
+                                 centers):
+            break
+
+    for r in range(1, n_rows, 2):
+        x = &X[rows[r] * n_features]
+        whole += _squared_distance_64(x, mean, n_features)
+        split += min(_squared_distance_64(x, centers, n_features),
+                     _squared_distance_64(x, centers + n_features, n_features))
+    gain[0] = (whole - split) * n_rows / (n_rows // 2)
+
+
+cdef void _trial_split_sparse(
+    const floating *X_data,  # IN (nnz,)
+    const int *X_indices,    # IN (nnz,)
+    const int *X_indptr,     # IN (n_samples + 1,)
+    intp_t n_features,
+    const intp_t *rows,      # IN (n_rows,)
+    intp_t n_rows,
+    intp_t feature,
+    double std,
+    int n_iterations,
+    double *buffer,          # TMP (3, n_features)
+    double *centers,         # OUT (2, n_features)
+    double *gain,            # OUT
+) noexcept nogil:
+    """Same as `_trial_split` for CSR rows."""
+    cdef:
+        double *mean = buffer
+        double *sums = buffer + n_features
+        intp_t n_fitted = (n_rows + 1) // 2
+        intp_t r, k, p, i, side, n_second
+        double whole = 0.0, split = 0.0
+        double mean_squared_norm, first_squared_norm, second_squared_norm
+
+    memset(mean, 0, n_features * sizeof(double))
+    for r in range(0, n_rows, 2):
+        i = rows[r]
+        for p in range(X_indptr[i], X_indptr[i + 1]):
+            mean[X_indices[p]] += X_data[p]
+    for k in range(n_features):
+        mean[k] /= n_fitted
+        centers[k] = mean[k]
+        centers[n_features + k] = mean[k]
+    centers[feature] += std
+    centers[n_features + feature] -= std
+
+    for _ in range(n_iterations):
+        first_squared_norm = _squared_norm_of_double(centers, n_features)
+        second_squared_norm = _squared_norm_of_double(centers + n_features,
+                                                      n_features)
+        memset(sums, 0, 2 * n_features * sizeof(double))
+        n_second = 0
+        for r in range(0, n_rows, 2):
+            i = rows[r]
+            side = (
+                _sparse_squared_distance_64(X_data, X_indices, X_indptr, i,
+                                            centers, first_squared_norm)
+                > _sparse_squared_distance_64(X_data, X_indices, X_indptr, i,
+                                              centers + n_features,
+                                              second_squared_norm)
+            )
+            n_second += side
+            for p in range(X_indptr[i], X_indptr[i + 1]):
+                sums[side * n_features + X_indices[p]] += X_data[p]
+        if _update_split_centers(sums, n_features, n_fitted - n_second, n_second,
+                                 centers):
+            break
+
+    mean_squared_norm = _squared_norm_of_double(mean, n_features)
+    first_squared_norm = _squared_norm_of_double(centers, n_features)
+    second_squared_norm = _squared_norm_of_double(centers + n_features, n_features)
+    for r in range(1, n_rows, 2):
+        i = rows[r]
+        whole += _sparse_squared_distance_64(X_data, X_indices, X_indptr, i, mean,
+                                             mean_squared_norm)
+        split += min(
+            _sparse_squared_distance_64(X_data, X_indices, X_indptr, i, centers,
+                                        first_squared_norm),
+            _sparse_squared_distance_64(X_data, X_indices, X_indptr, i,
+                                        centers + n_features, second_squared_norm),
+        )
+    gain[0] = (whole - split) * n_rows / (n_rows // 2)

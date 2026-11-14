@@ -30,7 +30,7 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 
 ## API
 
-`EMeans(n_clusters=8, *, init="random", n_epochs=5, random_state=None)`
+`EMeans(n_clusters=8, *, init="random", n_epochs=5, revival=0.1, random_state=None)`
 
 - `n_epochs` can be fractional: the fractional pass comes before the last
   epoch, which is always a full pass.
@@ -41,6 +41,16 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   candidates. `"k-means++"` (greedy k-means++, copied from scikit-learn main)
   is mostly for experimenting: `"k-means||"` gives a similar inertia much
   faster.
+- `revival` sets how clusters are revived during the fit. With a float, a
+  cluster whose weight is below `revival` times the mean weight of the
+  clusters is replaced by half of a heavier one. The default 0.1 (the value of
+  the reference implementation) is good to get clusters of homogeneous sizes, but it removes the
+  clusters with less than about a tenth of the mean cluster size: when the
+  data really has small clusters (e.g. outliers in heavy-tailed data), it may
+  not reach the best clustering, and a lower value, 0 (no revival) or
+  `"greedy"` do better. `"greedy"` (experimental, its rule may be tuned in
+  future versions) replaces a cluster by half of another one only when this
+  is estimated to lower the inertia, for a longer fit.
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.
 - Fitted attributes: `cluster_centers_`, `labels_`, `inertia_` and

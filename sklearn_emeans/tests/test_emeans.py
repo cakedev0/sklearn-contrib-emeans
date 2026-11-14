@@ -7,13 +7,15 @@ from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
 from threadpoolctl import threadpool_limits
 
-from sklearn_emeans import EMeans
+from sklearn_emeans import EMeans, _emeans
 from sklearn_emeans._emeans import (
     _epochs_n_rows,
+    _greedy_segments,
     _resolve_batch_size,
     _resolve_initial_step_size,
     _revive_dead_clusters,
 )
+from sklearn_emeans._greedy_revival import GreedyRevival, _pair, _trial_split
 from sklearn_emeans._kernels import (
     _emeans_steps,
     _emeans_steps_sparse,
@@ -344,6 +346,178 @@ def test_revive_dead_clusters_null_center():
     _revive_dead_clusters(centers, weight_ema, np.random.RandomState(0))
     assert not np.array_equal(centers[0], centers[1])
     assert_array_equal(weight_ema, [0.5, 0.5])
+
+
+def test_revive_dead_clusters_threshold():
+    # The cluster 1 has 5% of the mean weight.
+    centers = np.random.RandomState(0).uniform(1, 2, size=(4, 3))
+    weight_ema = np.array([10.0, 0.5, 14.5, 15.0])
+    rng = np.random.RandomState(0)
+    assert _revive_dead_clusters(centers, weight_ema.copy(), rng, 0.01) == 0
+    assert _revive_dead_clusters(centers, weight_ema.copy(), rng, 0.1) == 1
+
+
+def _big_and_tiny_blobs(dtype=np.float32):
+    """20 blobs of 1000 samples and 10 far blobs of 15 samples."""
+    rng = np.random.RandomState(0)
+    X, _ = make_blobs(n_samples=20_000, n_features=8, centers=20, random_state=0)
+    tiny_centers = rng.uniform(-60, 60, size=(10, 8))
+    X_tiny = np.concatenate([c + rng.normal(size=(15, 8)) for c in tiny_centers])
+    X = np.concatenate([X, X_tiny]).astype(dtype)
+    return X[rng.permutation(X.shape[0])]
+
+
+@pytest.mark.parametrize("revival", [0, "greedy"])
+def test_emeans_revival_keeps_small_clusters(revival):
+    # The default revival removes the clusters with less than a tenth of the
+    # mean cluster size, here the tiny blobs, which costs a lot of inertia.
+    X = _big_and_tiny_blobs()
+    params = dict(n_clusters=30, init="k-means||", random_state=0)
+    default = EMeans(**params).fit(X)
+    emeans = EMeans(revival=revival, **params).fit(X)
+    assert np.bincount(default.labels_).min() > 100
+    assert np.bincount(emeans.labels_).min() == 15
+    assert emeans.inertia_ < 0.2 * default.inertia_
+
+
+def test_emeans_revival_zero_never_revives(monkeypatch):
+    def revive(*args):
+        raise AssertionError("revival called")
+
+    monkeypatch.setattr(_emeans, "_revive_dead_clusters", revive)
+    X, _ = make_blobs(n_samples=5000, n_features=5, centers=10, random_state=0)
+    EMeans(n_clusters=10, revival=0, random_state=0).fit(X)
+    with pytest.raises(AssertionError, match="revival called"):
+        EMeans(n_clusters=10, random_state=0).fit(X)
+
+
+@pytest.mark.parametrize("init", ["random", "k-means||"])
+def test_emeans_greedy_revival_from_random_init(init):
+    # With a random init, some tiny blobs have no center and some big ones
+    # have several: the greedy revival moves these centers, where a revival
+    # based on the weights of the clusters can't.
+    X = _big_and_tiny_blobs()
+    params = dict(n_clusters=30, init=init, random_state=0)
+    greedy = EMeans(revival="greedy", **params).fit(X)
+    assert np.bincount(greedy.labels_).min() == 15
+    for revival in (0.1, 0.01):
+        assert greedy.inertia_ < 0.5 * EMeans(revival=revival, **params).fit(X).inertia_
+
+
+def test_emeans_greedy_revival_revives_dead_clusters():
+    X, _ = make_blobs(n_samples=5000, n_features=5, centers=10, random_state=0)
+    init = np.repeat(X[:1], 10, axis=0)
+    emeans = EMeans(n_clusters=10, init=init, revival="greedy", random_state=0).fit(X)
+    assert len(np.unique(emeans.cluster_centers_, axis=0)) == 10
+    assert np.bincount(emeans.labels_, minlength=10).min() > 100
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_emeans_greedy_revival_sparse_same_as_dense(csr_container, dtype):
+    X = _big_and_tiny_blobs(dtype)
+    params = dict(n_clusters=30, revival="greedy", random_state=0)
+    dense = EMeans(**params).fit(X)
+    sparse = EMeans(**params).fit(csr_container(X))
+    assert_allclose(
+        sparse.cluster_centers_, dense.cluster_centers_, rtol=1e-4, atol=1e-4
+    )
+    assert_array_equal(sparse.labels_, dense.labels_)
+
+
+def test_emeans_greedy_revival_independent_of_n_threads(monkeypatch):
+    X = _big_and_tiny_blobs()
+    params = dict(n_clusters=30, revival="greedy", random_state=0)
+    expected = EMeans(**params).fit(X).cluster_centers_
+    monkeypatch.setattr(_emeans, "_openmp_effective_n_threads", lambda: 1)
+    assert_array_equal(EMeans(**params).fit(X).cluster_centers_, expected)
+
+
+@pytest.mark.parametrize("n_clusters", [1, 2])
+def test_emeans_greedy_revival_few_clusters(n_clusters):
+    X, _ = make_blobs(n_samples=500, n_features=3, centers=3, random_state=0)
+    emeans = EMeans(n_clusters=n_clusters, revival="greedy", random_state=0).fit(X)
+    assert emeans.cluster_centers_.shape == (n_clusters, 3)
+    assert np.isfinite(emeans.cluster_centers_).all()
+
+
+def test_greedy_segments():
+    X = np.zeros((10, 2))
+    # 40 steps: revivals after the steps 5, 10, 15 and 20, in the first half.
+    greedy = GreedyRevival(X, n_steps=40, n_threads=1)
+    assert list(_greedy_segments(greedy, 0, 12)) == [(0, 5), (5, 10), (10, 12)]
+    assert list(_greedy_segments(greedy, 12, 12)) == [(0, 3), (3, 8), (8, 12)]
+    assert list(_greedy_segments(greedy, 24, 16)) == [(0, 16)]
+    assert list(_greedy_segments(None, 0, 12)) == [(0, 12)]
+
+
+def test_greedy_revival_replaces_useless_cluster():
+    # Two centers in the first blob, one in the middle of the two others: the
+    # cheapest cluster of the first blob is replaced by a half of the last
+    # cluster, split between its two blobs.
+    rng = np.random.RandomState(0)
+    blobs = np.array([[0.0, 0.0], [20.0, 0.0], [30.0, 0.0]])
+    X = np.concatenate([blob + rng.normal(size=(200, 2)) for blob in blobs])
+    centers = np.array([[-0.5, 0.0], [0.5, 0.0], [25.0, 0.0]])
+    weight_ema = np.array([1.0, 2.0, 4.0])
+
+    assert GreedyRevival(X, n_steps=10, n_threads=2)(centers, weight_ema) == 1
+
+    order = np.argsort(centers[:, 0])
+    assert_allclose(centers[order], blobs, atol=0.5)
+    assert_array_equal(np.sort(weight_ema), [1.0, 2.0, 2.0])
+    assert weight_ema[order[0]] != 2.0
+
+    # Nothing left to gain.
+    expected = centers.copy()
+    assert GreedyRevival(X, n_steps=10, n_threads=2)(centers, weight_ema) == 0
+    assert_array_equal(centers, expected)
+
+
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_trial_split(csr_container):
+    rng = np.random.RandomState(0)
+    X = rng.normal(size=(400, 3)) + 1
+    X[::2, 1] += 10
+    rng.shuffle(X)
+    inertia = ((X - X.mean(axis=0)) ** 2).sum()
+    labels = (X[:, 1] > 6).astype(int)
+    split_inertia = sum(
+        ((X[labels == j] - X[labels == j].mean(axis=0)) ** 2).sum() for j in (0, 1)
+    )
+    feature, std = 1, X[:, 1].std()
+    if csr_container is not None:
+        X = csr_container(X)
+
+    gain, centers = _trial_split(X, feature, std)
+
+    assert gain == pytest.approx(inertia - split_inertia, rel=0.05)
+    assert_allclose(np.sort(centers[:, 1]), [1, 11], atol=0.3)
+
+
+def test_pair():
+    # The clusters 3 and 0 are the cheapest to remove, 2 and 1 the best to
+    # split. The second pair is not worth it.
+    removed, donors = _pair(
+        cost=np.array([2.0, 9.0, 8.0, 1.0]), gain=np.array([0.0, 1.5, 5.0, 0.0])
+    )
+    assert_array_equal(removed, [3])
+    assert_array_equal(donors, [2])
+
+    # A cluster is not its own donor, and is in one pair at most.
+    removed, donors = _pair(cost=np.array([0.0, 1.0]), gain=np.array([5.0, 4.0]))
+    assert_array_equal(removed, [0])
+    assert_array_equal(donors, [1])
+
+    removed, donors = _pair(cost=np.zeros(3), gain=np.zeros(3))
+    assert len(removed) == len(donors) == 0
+
+
+@pytest.mark.parametrize("revival", [-0.1, 0.6, "dead", None, True])
+def test_emeans_invalid_revival(revival):
+    X = np.zeros((10, 2))
+    with pytest.raises(ValueError, match="revival must be"):
+        EMeans(n_clusters=2, revival=revival).fit(X)
 
 
 def test_scaling_laws():

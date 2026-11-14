@@ -13,7 +13,7 @@ from sklearn.datasets import make_blobs
 
 from sklearn_emeans import EMeans, _array_api
 from sklearn_emeans._emeans import _revive_dead_clusters
-from sklearn_emeans.tests.test_emeans import _reference_step
+from sklearn_emeans.tests.test_emeans import _big_and_tiny_blobs, _reference_step
 
 try:
     with sklearn.config_context(array_api_dispatch=True):
@@ -128,6 +128,35 @@ def test_fit_float64_revival_same_as_numpy(xp_name, device):
     )
 
 
+@pytest.mark.parametrize("revival", [0, 0.01, "greedy"])
+def test_fit_float64_revival_param_same_as_numpy(xp_name, device, revival):
+    if not _has_float64(xp_name, device):
+        pytest.skip("no float64 on this device")
+    X = _big_and_tiny_blobs(np.float64)
+    params = dict(n_clusters=30, revival=revival, random_state=0)
+    expected = EMeans(**params).fit(X)
+    with sklearn.config_context(array_api_dispatch=True):
+        emeans = EMeans(**params).fit(_to_device(xp_name, device, X))
+    assert_allclose(
+        _to_numpy(xp_name, emeans.cluster_centers_),
+        expected.cluster_centers_,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+
+
+def test_fit_float32_greedy_revival(xp_name, device):
+    X = _big_and_tiny_blobs(np.float32)
+    params = dict(n_clusters=30, init="k-means||", random_state=0)
+    X_xp = _to_device(xp_name, device, X)
+    with sklearn.config_context(array_api_dispatch=True):
+        default = EMeans(**params).fit(X_xp)
+        greedy = EMeans(revival="greedy", **params).fit(X_xp)
+    assert greedy.cluster_centers_.dtype == X_xp.dtype
+    assert _array_api.device(greedy.cluster_centers_) == _array_api.device(X_xp)
+    assert greedy.inertia_ < 0.2 * default.inertia_
+
+
 @pytest.mark.parametrize("init", ["random", "k-means||"])
 def test_fit_float32(xp_name, device, init):
     xp = _xp(xp_name)
@@ -238,6 +267,7 @@ def test_revive_dead_clusters_same_as_numpy(xp_name, device):
         probe,
         _array_api.from_numpy(xp, weight_ema, acc_dtype, dev),
         np.random.RandomState(3),
+        0.1,
     )
     assert_array_equal(_to_numpy(xp_name, new_centers), centers_ref)
     assert_allclose(_to_numpy(xp_name, new_weight_ema), weight_ema_ref, rtol=1e-6)
@@ -251,7 +281,7 @@ def test_no_dead_cluster_draws_no_random_number(xp_name, device):
         xp, np.ones(4), _array_api.accumulator_dtype(xp, dev), dev
     )
     random_state = np.random.RandomState(0)
-    _array_api.revive_dead_clusters(xp, centers, weight_ema, random_state)
+    _array_api.revive_dead_clusters(xp, centers, weight_ema, random_state, 0.1)
     assert random_state.uniform() == np.random.RandomState(0).uniform()
 
 

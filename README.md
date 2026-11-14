@@ -19,6 +19,9 @@ emeans.predict(X_new)
 
 ## Installation
 
+The package is on PyPI, as
+[sklearn-contrib-emeans](https://pypi.org/project/sklearn-contrib-emeans/):
+
 ```
 pip install sklearn-contrib-emeans
 ```

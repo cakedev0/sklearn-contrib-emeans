@@ -10,6 +10,7 @@ from threadpoolctl import threadpool_limits
 from sklearn_emeans import EMeans, _emeans
 from sklearn_emeans._emeans import (
     _epochs_n_rows,
+    _greedy_revival_period,
     _greedy_segments,
     _resolve_batch_size,
     _resolve_initial_step_size,
@@ -445,10 +446,20 @@ def test_emeans_greedy_revival_few_clusters(n_clusters):
     assert np.isfinite(emeans.cluster_centers_).all()
 
 
+def test_greedy_revival_period():
+    # Throughput law: every 5 steps, as the revival of the dead clusters.
+    batch_size = _resolve_batch_size(1_000_000, 1024, 64, 5)
+    assert _greedy_revival_period(1_000_000, 1024, 5, batch_size) == 5
+    # Quality law: 8x smaller batches, so 8x more steps between two revivals.
+    batch_size = _resolve_batch_size(1_000_000, 1024, 16, 5)
+    assert _greedy_revival_period(1_000_000, 1024, 5, batch_size) == 40
+    assert _greedy_revival_period(10, 3, 5, 1) == 5
+
+
 def test_greedy_segments():
     X = np.zeros((10, 2))
     # 40 steps: revivals after the steps 5, 10, 15 and 20, in the first half.
-    greedy = GreedyRevival(X, n_steps=40, n_threads=1)
+    greedy = GreedyRevival(X, n_steps=40, period=5, n_threads=1)
     assert list(_greedy_segments(greedy, 0, 12)) == [(0, 5), (5, 10), (10, 12)]
     assert list(_greedy_segments(greedy, 12, 12)) == [(0, 3), (3, 8), (8, 12)]
     assert list(_greedy_segments(greedy, 24, 16)) == [(0, 16)]
@@ -465,7 +476,7 @@ def test_greedy_revival_replaces_useless_cluster():
     centers = np.array([[-0.5, 0.0], [0.5, 0.0], [25.0, 0.0]])
     weight_ema = np.array([1.0, 2.0, 4.0])
 
-    assert GreedyRevival(X, n_steps=10, n_threads=2)(centers, weight_ema) == 1
+    assert GreedyRevival(X, n_steps=10, period=5, n_threads=2)(centers, weight_ema) == 1
 
     order = np.argsort(centers[:, 0])
     assert_allclose(centers[order], blobs, atol=0.5)
@@ -474,7 +485,7 @@ def test_greedy_revival_replaces_useless_cluster():
 
     # Nothing left to gain.
     expected = centers.copy()
-    assert GreedyRevival(X, n_steps=10, n_threads=2)(centers, weight_ema) == 0
+    assert GreedyRevival(X, n_steps=10, period=5, n_threads=2)(centers, weight_ema) == 0
     assert_array_equal(centers, expected)
 
 

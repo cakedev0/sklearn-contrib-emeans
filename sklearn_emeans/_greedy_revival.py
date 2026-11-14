@@ -70,12 +70,15 @@ class GreedyRevival:
     n_steps : int
         Total number of steps of the fit.
 
+    period : int
+        Number of steps between two revivals.
+
     n_threads : int
         Number of OpenMP threads. The results don't depend on it. The BLAS
         should be sequential during the calls.
     """
 
-    def __init__(self, X, n_steps, n_threads):
+    def __init__(self, X, n_steps, period, n_threads):
         if sp.issparse(X):
             if X.indices.dtype != np.int32 or X.indptr.dtype != np.int32:
                 X = sp.csr_matrix(
@@ -86,11 +89,12 @@ class GreedyRevival:
             X = np.ascontiguousarray(X)
         self.X = X
         self.last_step = n_steps * _MAX_SCHEDULE_FRACTION
+        self.period = period
         self.n_threads = n_threads
 
-    def is_active(self, step):
-        """Whether clusters can be revived after `step` steps of the fit."""
-        return step <= self.last_step
+    def is_revival_step(self, step):
+        """Whether clusters are revived after `step` steps of the fit."""
+        return step % self.period == 0 and step <= self.last_step
 
     def __call__(self, centers, weight_ema):
         """Revive clusters, inplace. Returns the number of revived clusters."""

@@ -135,6 +135,19 @@ def _resolve_batch_size(n_samples, n_clusters, n_features, n_epochs):
     return max(1, min(batch_size, max_batch_size, n_samples))
 
 
+def _greedy_revival_period(n_samples, n_clusters, n_epochs, batch_size):
+    """Number of steps between two greedy revivals.
+
+    `_REVIVAL_PERIOD` batches of the "throughput" law: the smaller batches of
+    the "quality" law don't get more revivals for the same number of samples,
+    since the time of a greedy revival doesn't depend on the batch size.
+    """
+    throughput_batch_size = _resolve_batch_size(
+        n_samples, n_clusters, _QUALITY_BATCH_MAX_FEATURES + 1, n_epochs
+    )
+    return _REVIVAL_PERIOD * max(1, round(throughput_batch_size / batch_size))
+
+
 def _resolve_initial_step_size(n_samples, n_clusters, n_epochs, batch_size):
     """Initial EMA step size given by the fitted step law."""
     c, a_k, a_b, a_n, a_t = _STEP_LAW
@@ -158,7 +171,7 @@ def _epochs_n_rows(n_samples, n_epochs):
 
 def _is_greedy_step(greedy, step):
     """Whether the greedy revival runs after `step` steps of the fit."""
-    return greedy is not None and step % _REVIVAL_PERIOD == 0 and greedy.is_active(step)
+    return greedy is not None and greedy.is_revival_step(step)
 
 
 def _greedy_segments(greedy, first_step, n_epoch_steps):
@@ -299,14 +312,14 @@ class EMeans(
         is always a full pass.
 
     revival : float in [0, 0.5] or 'greedy', default=0.1
-        How clusters are revived during the fit, every 5 steps:
+        How clusters are revived during the fit:
 
-        If a float, a cluster is dead when its weight (an exponential moving
-        average of the number of samples it gets per batch) is below `revival`
-        times the mean weight of the clusters. Each dead cluster is replaced
-        by half of a cluster drawn with a probability proportional to its
-        weight. 0 turns the revival off. This revival is always off when
-        `n_features <= 2`.
+        If a float, every 5 steps, a cluster is dead when its weight (an
+        exponential moving average of the number of samples it gets per
+        batch) is below `revival` times the mean weight of the clusters. Each
+        dead cluster is replaced by half of a cluster drawn with a probability
+        proportional to its weight. 0 turns the revival off. This revival is
+        always off when `n_features <= 2`.
 
         The default 0.1 is the value of the reference implementation. It is
         a good choice to get clusters of homogeneous sizes, but it keeps
@@ -538,7 +551,7 @@ class EMeans(
             return 0
         return _REVIVAL_PERIOD
 
-    def _greedy_revival(self, X, to_numpy, n_steps, random_state):
+    def _greedy_revival(self, X, to_numpy, n_steps, batch_size, random_state):
         """The greedy revival on a sample of X, or None for the other revivals.
 
         `to_numpy(X, indices)` gives the rows of X of the given indices, all
@@ -547,8 +560,11 @@ class EMeans(
         if self.revival != "greedy" or self.n_clusters < 2:
             return None
         indices = greedy_sample_indices(X.shape[0], self.n_clusters, random_state)
+        period = _greedy_revival_period(
+            X.shape[0], self.n_clusters, self.n_epochs, batch_size
+        )
         return GreedyRevival(
-            to_numpy(X, indices), n_steps, _openmp_effective_n_threads()
+            to_numpy(X, indices), n_steps, period, _openmp_effective_n_threads()
         )
 
     def fit(self, X, y=None):
@@ -621,6 +637,7 @@ class EMeans(
             X,
             lambda X, indices: X if indices is None else X[indices],
             n_steps,
+            batch_size,
             random_state,
         )
 
@@ -769,18 +786,19 @@ class EMeans(
                 else xp.take(X, _array_api.index_array(xp, indices, device), axis=0),
             ),
             n_steps,
+            batch_size,
             random_state,
         )
         if greedy is not None:
-            # Called every `_REVIVAL_PERIOD` steps, with a sequential BLAS for
-            # its thread pool.
-            revival_period = _REVIVAL_PERIOD
+            # Called every `greedy.period` steps, with a sequential BLAS for
+            # its OpenMP threads.
+            revival_period = greedy.period
             n_calls = 0
 
             def revive(centers, weight_ema):
                 nonlocal n_calls
                 n_calls += 1
-                if not greedy.is_active(n_calls * _REVIVAL_PERIOD):
+                if not greedy.is_revival_step(n_calls * greedy.period):
                     return centers, weight_ema
                 with _threadpool_controller().limit(limits=1, user_api="blas"):
                     return _array_api.revive_greedy(xp, greedy, centers, weight_ema)

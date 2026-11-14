@@ -3,7 +3,7 @@ This binary distribution of sklearn-contrib-emeans also bundles the following so
 ----
 
 Name: libomp runtime library
-Files: sklearn/.dylibs/libomp.dylib
+Files: sklearn_emeans/.dylibs/libomp.dylib
 Availability: https://github.com/llvm/llvm-project
 
 ==============================================================================

@@ -21,26 +21,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # OpenMP is not available with Apple Clang: vendor a conda-forge libomp
-      # in the wheels. libomp 11, as in scikit-learn's wheels, lacks
-      # __kmpc_dispatch_deinit, which recent Apple Clang emits for the dynamic
-      # and guided schedules.
-      - uses: mamba-org/setup-micromamba@v3
-        if: runner.os == 'macOS'
-        with:
-          environment-name: openmp
-          create-args: llvm-openmp=23.1.5
-          init-shell: none
+      # OpenMP is not available with Apple Clang: vendor a libomp in the
+      # wheels, built from source so that it works next to the libomp of other
+      # wheels (see build_tools/build_macos_libomp.sh). libomp 11, as in
+      # scikit-learn's wheels, lacks __kmpc_dispatch_deinit, which recent
+      # Apple Clang emits for the dynamic and guided schedules.
       - name: Enable OpenMP with Apple Clang
         if: runner.os == 'macOS'
         run: |
-          PREFIX="$MAMBA_ROOT_PREFIX/envs/openmp"
+          PREFIX="$RUNNER_TEMP/openmp"
           if [[ "$(uname -m)" == "arm64" ]]; then
-            echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+            export MACOSX_DEPLOYMENT_TARGET=12.0
           else
-            # The minimum of llvm-openmp 23.
-            echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+            export MACOSX_DEPLOYMENT_TARGET=11.0
           fi
+          bash build_tools/build_macos_libomp.sh 23.1.5 "$PREFIX"
+          echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET" >> "$GITHUB_ENV"
           echo "CC=/usr/bin/clang" >> "$GITHUB_ENV"
           echo "CPPFLAGS=-Xpreprocessor -fopenmp" >> "$GITHUB_ENV"
           echo "CFLAGS=-I$PREFIX/include" >> "$GITHUB_ENV"
@@ -48,10 +44,32 @@ jobs:
 
       - uses: pypa/cibuildwheel@v4.3.5
 
+      - name: Check the libomp vendored in the wheels
+        if: runner.os == 'macOS'
+        run: bash build_tools/check_macos_libomp.sh wheelhouse/*.whl
+
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
+
+  # The PyTorch wheels for macOS bundle their own libomp: check that ours works
+  # next to it. PyTorch has no wheel for the Intel Macs anymore.
+  test-macos-pytorch:
+    name: Test next to the PyTorch wheel on macOS
+    needs: wheels
+    runs-on: macos-15
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-macos-15
+          path: wheelhouse
+      - run: pip install wheelhouse/*-cp313-*.whl pytest torch
+      - run: pytest --pyargs sklearn_emeans.tests.test_openmp_runtimes -v -p no:cacheprovider | tee out.txt
+      - run: grep -E "2 passed" out.txt
 
   sdist:
     runs-on: ubuntu-latest
@@ -67,7 +85,7 @@ jobs:
     # Needs a trusted publisher on PyPI for this repository, workflow and the
     # "pypi" environment.
     if: github.event_name == 'release'
-    needs: [wheels, sdist]
+    needs: [wheels, test-macos-pytorch, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

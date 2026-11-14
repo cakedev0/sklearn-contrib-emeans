@@ -1,8 +1,8 @@
 # sklearn-contrib-emeans
 
 `EMeans` is a scikit-learn compatible implementation of e-means, a mini-batch
-k-means that reaches the inertia of `KMeans` in a few passes over the data
-instead of tens of iterations.
+k-means that typically gets close to the inertia of `KMeans` in a few passes
+over the data instead of tens of iterations.
 
 Each center is an exponential moving average (EMA) of the samples assigned to
 it, with a cosine schedule on the EMA step. The batch size and the initial step
@@ -19,11 +19,14 @@ emeans.predict(X_new)
 
 ## Installation
 
+The package is on PyPI, as
+[sklearn-contrib-emeans](https://pypi.org/project/sklearn-contrib-emeans/):
+
 ```
 pip install sklearn-contrib-emeans
 ```
 
-It needs Python >= 3.10 and scikit-learn >= 1.6. The other dependencies
+It needs Python >= 3.10 and scikit-learn >= 1.7. The other dependencies
 (NumPy, SciPy, joblib, threadpoolctl) have the same minimum versions as in
 scikit-learn 1.10. The wheels are built with OpenMP: `EMeans` uses all the
 physical cores, or `OMP_NUM_THREADS` if it is set.
@@ -53,6 +56,35 @@ The input can be dense or a sparse CSR matrix (other sparse formats are
 converted to CSR), in float32 or float64 (float32 is faster). There is no
 `sample_weight` yet.
 
+## GPU and array API inputs
+
+`EMeans` also fits on PyTorch tensors and CuPy arrays (and on the arrays of
+other libraries that follow the [array API](https://data-apis.org/array-api/)),
+on their device. As for the scikit-learn estimators, this must be
+[enabled](https://scikit-learn.org/stable/modules/array_api.html) with
+`array_api_dispatch=True`, and with `SCIPY_ARRAY_API=1` in the environment:
+
+```python
+import sklearn
+import torch
+from sklearn_emeans import EMeans
+
+X = torch.asarray(X_numpy, device="mps")  # or "cuda", "xpu"
+with sklearn.config_context(array_api_dispatch=True):
+    emeans = EMeans(n_clusters=1024).fit(X)
+    labels = emeans.predict(X)
+emeans.cluster_centers_  # a tensor on the device of X
+```
+
+- The random numbers are drawn on the host, in the same order as for NumPy
+  inputs: from the same `random_state`, the results are the same up to
+  rounding. On devices without float64 (Apple GPUs), all the computations are
+  in float32.
+- With `init="k-means||"`, the sampling rounds run on the device and the final
+  k-means++ on the candidates runs on the host. `init="k-means++"` copies the
+  data to the host.
+- Only dense inputs.
+
 ## Algorithm
 
 The algorithm is described in:
@@ -74,30 +106,27 @@ transposed centers.
 
 ## Performance
 
-On one socket of a Xeon 6787P with 43 threads, on float32 blobs, `EMeans`
-with the default 5 epochs fits 6-17x faster than `KMeans(n_init=1)` for the
-same or lower inertia. For example, 1M samples x 128 features with 1024
-clusters take 0.70 s against 5.2 s. See
-[cakedev0/scikit-learn#46](https://github.com/cakedev0/scikit-learn/pull/46)
-for the full benchmark, which uses the same kernel.
+You can use the GPU in a laptop or desktop to speed up `EMeans`, including
+Apple GPUs and Intel integrated or Arc GPUs. In tests on synthetic data with
+128 or 512 features, these GPUs were about 3–9x faster than the CPU in the
+same machine, using PyTorch with the default 5 epochs. With only a few
+features, the CPU can be faster: on data with 3 features, CPU was 2–3x faster.
 
-On sparse input, with 22 threads on 22 cores of the same Xeon (one NUMA node,
-with SMT siblings), `EMeans` fits 10-40x faster than `KMeans(n_init=1)`
-(scikit-learn 1.10.dev0) on the TF-IDF of 20 newsgroups and on RCV1 (float32,
-20 or 100 clusters), with an inertia within 0.2%. For example, RCV1 (804k
-samples x 47k features, density 0.16%) with 100 clusters takes 1.2 s against
-48 s. See [#3](https://github.com/cakedev0/sklearn-contrib-emeans/pull/3).
-
-The best batch size depends on the dataset: on some datasets, batches 4x
-smaller or larger than the scaling law's give a lower inertia for the same
-fit time. A `batch_size` parameter may come later.
+On a high-end Intel server, `EMeans` with the default 5 epochs was 6–17x
+faster than scikit-learn's `KMeans(n_init=1)` on synthetic data, with equally
+good or better clustering. On sparse text data, it was 10–40x faster with
+nearly the same clustering quality. See the
+[benchmarks](https://pr-187.sklbench-dashboard-preview.pages.dev/kmeans_pareto) for details.
 
 ## Relation to scikit-learn
 
-This package is a step towards adding `EMeans` to scikit-learn itself, see
+This is an independent package, not affiliated with scikit-learn or
+[scikit-learn-contrib](https://github.com/scikit-learn-contrib). The plan is
+to submit it to scikit-learn-contrib soon.
+
+It is the place to collect feedback on `EMeans` and stabilize its API. Adding
+it to scikit-learn itself is under discussion in
 [scikit-learn#35383](https://github.com/scikit-learn/scikit-learn/issues/35383).
-The plan is to collect feedback and stabilize the API here, then move it to
-`sklearn.cluster` for scikit-learn 1.11.
 
 Feedback is welcome in the issues, especially on datasets where `EMeans` does
 worse than `KMeans`.

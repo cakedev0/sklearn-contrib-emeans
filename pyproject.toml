@@ -22,7 +22,7 @@ dependencies = [
     "joblib>=1.4.0",
     "numpy>=1.26.0",
     "scipy>=1.11.4",
-    "scikit-learn>=1.6",
+    "scikit-learn>=1.7",
     "threadpoolctl>=3.5.0",
 ]
 classifiers = [

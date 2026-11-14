@@ -14,6 +14,21 @@ of iterations.
     emeans.cluster_centers_, emeans.labels_, emeans.inertia_
     emeans.predict(X_new)
 
+It also fits on a GPU, on PyTorch tensors or CuPy arrays, for instance on the
+GPU of a Mac:
+
+.. code-block:: python
+
+    import sklearn
+    import torch
+
+    X = torch.asarray(X, dtype=torch.float32, device="mps")  # or "cuda", "xpu"
+    with sklearn.config_context(array_api_dispatch=True):
+        emeans = EMeans(n_clusters=256, n_epochs=5).fit(X)
+    emeans.cluster_centers_  # a tensor on the device of X
+
+This needs `SCIPY_ARRAY_API=1` in the environment, see :ref:`array_api_inputs`.
+
 Install it with `pip install sklearn-contrib-emeans`. It needs Python >= 3.10
 and scikit-learn >= 1.7.
 

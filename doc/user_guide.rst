@@ -148,9 +148,15 @@ estimators, this must be enabled with `array_api_dispatch=True`, and with
 
 - Only dense inputs are supported.
 - The random numbers are drawn on the host, in the same order as for NumPy
-  inputs: from the same `random_state`, the results are the same up to
-  rounding. On devices without float64 (Apple GPUs), all the computations are
-  in float32.
+  inputs, but the results are not identical: the rounding differs, and a
+  sample that changes cluster changes the next steps. On devices without
+  float64 (Apple GPUs), all the computations are in float32.
+- On GPUs, two fits with the same `random_state` can give different results
+  (seen with PyTorch on CUDA, where the inertia changed by up to 1%): the sums
+  of the samples of each cluster are added in an order that changes from one
+  run to the next. With PyTorch, `torch.use_deterministic_algorithms(True)`
+  makes the fits reproducible. They were 10-60% slower with it on an NVIDIA
+  L4.
 - With `init="k-means||"`, the sampling rounds run on the device and the final
   k-means++ on the candidates runs on the host. `init="k-means++"` copies the
   data to the host.

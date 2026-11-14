@@ -330,10 +330,12 @@ class EMeans(
 
     For array API inputs, the Cython kernels are replaced by array operations
     of the library of the input. The random numbers are drawn on the host in
-    the same order, so the results are the same up to rounding. On devices
-    without float64, the EMA weights and the sums of the last epoch are in
-    float32. With `init="k-means||"`, the final k-means++ on the candidates
-    runs on the host, and `init="k-means++"` copies the data to the host.
+    the same order, but the results are not identical since the rounding
+    differs. On GPUs, two fits with the same `random_state` can also give
+    different results. On devices without float64, the EMA weights and the
+    sums of the last epoch are in float32. With `init="k-means||"`, the final
+    k-means++ on the candidates runs on the host, and `init="k-means++"`
+    copies the data to the host.
 
     References
     ----------
@@ -385,9 +387,11 @@ class EMeans(
         if (
             not isinstance(self.n_epochs, Real)
             or isinstance(self.n_epochs, bool)
-            or not self.n_epochs > 0
+            or not 0 < self.n_epochs < math.inf
         ):
-            raise ValueError(f"n_epochs must be a float > 0, got {self.n_epochs!r}.")
+            raise ValueError(
+                f"n_epochs must be a finite float > 0, got {self.n_epochs!r}."
+            )
         if isinstance(self.init, str):
             if self.init not in ("random", "k-means++", "k-means||"):
                 raise ValueError(

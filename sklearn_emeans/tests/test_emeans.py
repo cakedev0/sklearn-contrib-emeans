@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -456,7 +459,9 @@ def test_emeans_init_array_and_callable():
     [
         ({"n_clusters": 0}, "n_clusters must be an int >= 1"),
         ({"n_clusters": 2.5}, "n_clusters must be an int >= 1"),
-        ({"n_epochs": 0}, "n_epochs must be a float > 0"),
+        ({"n_epochs": 0}, "n_epochs must be a finite float > 0"),
+        ({"n_epochs": float("inf")}, "n_epochs must be a finite float > 0"),
+        ({"n_epochs": float("nan")}, "n_epochs must be a finite float > 0"),
         ({"init": "unknown"}, "init must be 'random', 'k-means\\+\\+'"),
         ({"init": np.zeros((3, 2))}, "does not match the number of clusters"),
         ({"init": np.zeros((2, 3))}, "does not match the number of features"),
@@ -621,3 +626,56 @@ def test_kmeans_parallel_sparse_matches_dense(dtype, csr_container):
     inertia = EMeans(n_clusters=30, init=centers).fit(X).inertia_
     inertia_csr = EMeans(n_clusters=30, init=centers_csr).fit(X).inertia_
     assert inertia_csr == pytest.approx(inertia, rel=0.01)
+
+
+_ALLOCATION_FAILURE_CODE = """
+import resource
+
+import numpy as np
+
+from sklearn_emeans import EMeans
+
+n_clusters = 50_000
+X = np.random.RandomState(0).uniform(size=(n_clusters, 2))
+# Starts the threads and imports all that fit and predict need.
+emeans = EMeans(n_clusters=2, init="k-means||", random_state=0).fit(X)
+emeans.predict(X)
+
+# No room left for the distances of a chunk of rows to the centers: 100 MB
+# per thread, and 50 MB in the sampling rounds of k-means||.
+with open("/proc/self/statm") as f:
+    vm_size = int(f.read().split()[0]) * resource.getpagesize()
+resource.setrlimit(resource.RLIMIT_AS, (vm_size + 20 * 2**20,) * 2)
+
+for method in ["fit", "k-means||", "predict"]:
+    try:
+        if method == "predict":
+            emeans.cluster_centers_ = X.copy()
+            emeans.predict(X)
+        else:
+            init = "random" if method == "fit" else method
+            EMeans(n_clusters=n_clusters, init=init, n_epochs=1).fit(X)
+    except MemoryError:
+        print(method, "MemoryError")
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs RLIMIT_AS and /proc")
+def test_emeans_allocation_failure():
+    # A buffer of the kernels that can't be allocated raises a MemoryError,
+    # where it used to end in a segmentation fault.
+    result = subprocess.run(
+        [sys.executable, "-c", _ALLOCATION_FAILURE_CODE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.split() == [
+        "fit",
+        "MemoryError",
+        "k-means||",
+        "MemoryError",
+        "predict",
+        "MemoryError",
+    ]

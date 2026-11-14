@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>User guide &#8212; sklearn-contrib-emeans</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=75c7c72ae941e8b558d8" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=75c7c72ae941e8b558d8" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/sg_gallery.css?v=c83e6b79" />
+    <link rel="stylesheet" type="text/css" href="_static/sg_gallery-binder.css?v=f4aeca0c" />
+    <link rel="stylesheet" type="text/css" href="_static/sg_gallery-dataframe.css?v=2082cf3c" />
+    <link rel="stylesheet" type="text/css" href="_static/sg_gallery-rendered-html.css?v=1277b6f3" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="_static/scripts/fontawesome.js?digest=75c7c72ae941e8b558d8"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=75c7c72ae941e8b558d8" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=75c7c72ae941e8b558d8" />
+
+    <script src="_static/documentation_options.js?v=71d9d8e6"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/sg-tags.js?v=d80f6fa4"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'user_guide';</script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="icon" href="_static/favicon.svg"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="API reference" href="api.html" />
+    <link rel="prev" title="sklearn-contrib-emeans" href="index.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light dark"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="0.3.2" />
+  
+    
+    <script src="_static/searchtools.js"></script>
+    <script src="_static/language_data.js"></script>
+    <script src="searchindex.js"></script>
+  
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button type="button" class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation" aria-expanded="false" aria-controls="pst-primary-sidebar-modal">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">sklearn-contrib-emeans</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="#" aria-current="page">
+    User guide
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="api.html">
+    API reference
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="auto_examples/index.html">
+    Examples
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button type="button" class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button type="button" class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg me-1"></i>System Settings</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg me-1"></i>Light</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/cakedev0/sklearn-contrib-emeans" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">GitHub</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button type="button" class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button type="button" class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page" aria-expanded="false" aria-controls="pst-secondary-sidebar-modal">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal" tabindex="-1"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar hide-on-wide">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="#" aria-current="page">
+    User guide
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="api.html">
+    API reference
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="auto_examples/index.html">
+    Examples
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button type="button" class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg me-1"></i>System Settings</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg me-1"></i>Light</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/cakedev0/sklearn-contrib-emeans" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">GitHub</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-house"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">User guide</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="user-guide">
+<span id="id1"></span><h1>User guide<a class="headerlink" href="#user-guide" title="Link to this heading">#</a></h1>
+<p><a class="reference internal" href="generated/sklearn_emeans.EMeans.html#sklearn_emeans.EMeans" title="sklearn_emeans.EMeans"><code class="xref py py-class docutils literal notranslate"><span class="pre">EMeans</span></code></a> minimizes the inertia, the sum of the squared
+distances of the samples to their closest center, like
+<a class="reference external" href="https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html#sklearn.cluster.KMeans" title="(in scikit-learn v1.9)"><code class="xref py py-class docutils literal notranslate"><span class="pre">KMeans</span></code></a> and <a class="reference external" href="https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html#sklearn.cluster.MiniBatchKMeans" title="(in scikit-learn v1.9)"><code class="xref py py-class docutils literal notranslate"><span class="pre">MiniBatchKMeans</span></code></a>
+(see <a class="reference external" href="https://scikit-learn.org/stable/modules/clustering.html#k-means" title="(in scikit-learn v1.9)"><span>K-means</span></a>). It implements e-means <a class="footnote-reference brackets" href="#id4" id="id2" role="doc-noteref"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></a>, which typically gets close to
+the inertia of Lloyd’s algorithm in a few passes over the data instead of tens
+of iterations.</p>
+<section id="what-e-means-does">
+<h2>What e-means does<a class="headerlink" href="#what-e-means-does" title="Link to this heading">#</a></h2>
+<p>E-means is a mini-batch variant of k-means in which each center is the ratio of
+two exponential moving averages, computed over the mini-batches: the running sum
+<span class="math notranslate nohighlight">\(S_j\)</span> and the running weight <span class="math notranslate nohighlight">\(N_j\)</span> of the samples assigned to
+cluster <span class="math notranslate nohighlight">\(j\)</span>. With <span class="math notranslate nohighlight">\(s_j\)</span> and <span class="math notranslate nohighlight">\(n_j\)</span> the sum and the number of
+the samples of a mini-batch assigned to the cluster, and <span class="math notranslate nohighlight">\(\alpha\)</span> the step
+size, each mini-batch updates them as:</p>
+<div class="math notranslate nohighlight">
+\[S_j \leftarrow (1 - \alpha) S_j + \alpha s_j, \qquad
+N_j \leftarrow (1 - \alpha) N_j + \alpha n_j, \qquad
+c_j = S_j / N_j.\]</div>
+<p>With a single mini-batch holding all the samples and <span class="math notranslate nohighlight">\(\alpha = 1\)</span>, this is
+an iteration of Lloyd’s algorithm. Around this update:</p>
+<ul class="simple">
+<li><p>The step size is shared by all the centers and follows a cosine decay, from
+its initial value to a tenth of it. In
+<a class="reference external" href="https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html#sklearn.cluster.MiniBatchKMeans" title="(in scikit-learn v1.9)"><code class="xref py py-class docutils literal notranslate"><span class="pre">MiniBatchKMeans</span></code></a>, each center has its own learning
+rate, the inverse of the number of samples it has seen.</p></li>
+<li><p>Every 5 mini-batches, the dead clusters, whose running weight is below a
+tenth of the mean one, are revived: each takes half of a heavier cluster,
+which is split in two. Clusters are not revived on data with 1 or 2 features.</p></li>
+<li><p>At the end of the last epoch, each center is set to the mean of the samples
+assigned to it during that epoch.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">labels_</span></code> and <code class="docutils literal notranslate"><span class="pre">inertia_</span></code> are then computed with one more pass over the data,
+so that they match the final centers and <code class="docutils literal notranslate"><span class="pre">predict</span></code>.</p></li>
+</ul>
+<p>The batch size and the initial step size are not parameters. They are given by
+scaling laws that the authors of e-means fitted as functions of the number of
+samples, of clusters and of epochs. The batch size grows almost linearly with
+the number of samples, and is 8 times smaller for data with up to 16 features. It is stored in <code class="docutils literal notranslate"><span class="pre">batch_size_</span></code> after a fit.</p>
+</section>
+<section id="choosing-n-epochs">
+<h2>Choosing <code class="docutils literal notranslate"><span class="pre">n_epochs</span></code><a class="headerlink" href="#choosing-n-epochs" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">n_epochs</span></code>, the number of passes over the data, is the parameter that trades
+fit time for inertia. The authors report that e-means goes below the loss of
+Lloyd’s algorithm after 25 iterations in 1.4 to 2.6 passes over the data, on
+embedding datasets.</p>
+<figure class="align-center">
+<a class="reference external image-reference" href="auto_examples/plot_emeans_comparison.html"><img alt="_images/sphx_glr_plot_emeans_comparison_001.png" height="300" src="_images/sphx_glr_plot_emeans_comparison_001.png" width="450" />
+</a>
+</figure>
+<p>In <a class="reference internal" href="auto_examples/plot_emeans_comparison.html#sphx-glr-auto-examples-plot-emeans-comparison-py"><span class="std std-ref">this example</span></a>, 2 to
+3 epochs reach the inertia that <code class="docutils literal notranslate"><span class="pre">KMeans</span></code> reaches after tens of iterations, and
+the default of 5 epochs reaches its inertia after 100 iterations.</p>
+<ul class="simple">
+<li><p>Start from the default, <code class="docutils literal notranslate"><span class="pre">n_epochs=5</span></code>. Lower it to 2 or 3 when the fit time
+matters more than the last fraction of a percent of inertia, and raise it to
+compare: more epochs usually give a lower inertia, but not always.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">n_epochs</span></code> can be fractional. With <code class="docutils literal notranslate"><span class="pre">n_epochs=2.5</span></code>, the half pass comes before
+the last epoch, which is always a full pass. With <code class="docutils literal notranslate"><span class="pre">n_epochs=0.5</span></code>, the fit sees
+half of the samples once.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">n_epochs</span></code> is a fixed budget: there is no convergence criterion and no early
+stopping. The batch size and the schedule of the step size depend on it, so a
+fit with more epochs is not the continuation of a fit with fewer.</p></li>
+</ul>
+</section>
+<section id="when-to-use-emeans">
+<h2>When to use <code class="docutils literal notranslate"><span class="pre">EMeans</span></code><a class="headerlink" href="#when-to-use-emeans" title="Link to this heading">#</a></h2>
+<p><strong>Rather than</strong> <code class="docutils literal notranslate"><span class="pre">KMeans</span></code>, when an iteration of Lloyd’s algorithm is expensive,
+that is with many samples. An epoch of <code class="docutils literal notranslate"><span class="pre">EMeans</span></code> has the complexity of an
+iteration of Lloyd’s algorithm, and a few epochs do the work of tens of
+iterations. Prefer <code class="docutils literal notranslate"><span class="pre">KMeans</span></code>:</p>
+<ul class="simple">
+<li><p>on small datasets, which it fits in a negligible time;</p></li>
+<li><p>with sample weights, which <code class="docutils literal notranslate"><span class="pre">EMeans</span></code> does not support yet;</p></li>
+<li><p>when the best clustering has many small clusters. Reviving the dead clusters,
+whose running weight is below a tenth of the mean one, pushes towards balanced
+clusters, so <code class="docutils literal notranslate"><span class="pre">EMeans</span></code> can end above the inertia of <code class="docutils literal notranslate"><span class="pre">KMeans</span></code> on such data;</p></li>
+<li><p>when the centers must be a local minimum of the inertia, where an iteration of
+Lloyd’s algorithm no longer moves them. <code class="docutils literal notranslate"><span class="pre">EMeans</span></code> stops after its budget, and
+its centers are not such a minimum. Iterations of Lloyd’s algorithm from
+them, with <code class="docutils literal notranslate"><span class="pre">KMeans(n_clusters,</span> <span class="pre">init=emeans.cluster_centers_)</span></code>, can only lower
+the inertia.</p></li>
+</ul>
+<p><strong>Rather than</strong> <code class="docutils literal notranslate"><span class="pre">MiniBatchKMeans</span></code>, when the data fits in memory: for the same
+number of passes, <code class="docutils literal notranslate"><span class="pre">EMeans</span></code> reaches a lower inertia in the example above.
+<code class="docutils literal notranslate"><span class="pre">MiniBatchKMeans</span></code> remains the choice for data that arrives as a stream or does
+not fit in memory, with its <code class="docutils literal notranslate"><span class="pre">partial_fit</span></code>. Each epoch of <code class="docutils literal notranslate"><span class="pre">EMeans</span></code> goes through
+a permutation of the whole dataset.</p>
+</section>
+<section id="initialization">
+<h2>Initialization<a class="headerlink" href="#initialization" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">init</span></code> can be:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;random&quot;</span></code>, the default: <code class="docutils literal notranslate"><span class="pre">n_clusters</span></code> samples drawn at random;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;k-means||&quot;</span></code>: scalable k-means++ <a class="footnote-reference brackets" href="#id5" id="id3" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>. A few rounds over the data sample
+candidates far from the candidates so far, then a weighted k-means++ on the
+candidates gives the centers. It costs about as much as 2 to 3 epochs;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;k-means++&quot;</span></code>: greedy k-means++, as in
+<a class="reference external" href="https://scikit-learn.org/stable/modules/generated/sklearn.cluster.kmeans_plusplus.html#sklearn.cluster.kmeans_plusplus" title="(in scikit-learn v1.9)"><code class="xref py py-func docutils literal notranslate"><span class="pre">sklearn.cluster.kmeans_plusplus()</span></code></a>. It draws the centers one after the
+other and is mostly there for experimenting: <code class="docutils literal notranslate"><span class="pre">&quot;k-means||&quot;</span></code> gives a similar
+inertia much faster;</p></li>
+<li><p>an array of centers, or a callable returning one.</p></li>
+</ul>
+<p>The time of a better initialization can also be spent on more epochs: compare
+both on your data.</p>
+</section>
+<section id="input-data">
+<h2>Input data<a class="headerlink" href="#input-data" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">X</span></code> is a dense array or a sparse CSR matrix. The other sparse formats are
+converted to CSR. float32 and float64 data are used as they are, and float32
+is faster. The other dtypes are converted to float64.</p>
+</section>
+<section id="gpu-and-array-api-inputs">
+<span id="array-api-inputs"></span><h2>GPU and array API inputs<a class="headerlink" href="#gpu-and-array-api-inputs" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">EMeans</span></code> also fits on PyTorch tensors and CuPy arrays (and on the arrays of
+other libraries that follow the <a class="reference external" href="https://data-apis.org/array-api/">array API</a>), on their device. As for the scikit-learn
+estimators, this must be enabled with <code class="docutils literal notranslate"><span class="pre">array_api_dispatch=True</span></code>, and with
+<code class="docutils literal notranslate"><span class="pre">SCIPY_ARRAY_API=1</span></code> in the environment (see <a class="reference external" href="https://scikit-learn.org/stable/modules/array_api.html#array-api" title="(in scikit-learn v1.9)"><span>Array API support (experimental)</span></a>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">sklearn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">sklearn_emeans</span><span class="w"> </span><span class="kn">import</span> <span class="n">EMeans</span>
+
+<span class="n">X</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">X_numpy</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">"mps"</span><span class="p">)</span>  <span class="c1"># or "cuda", "xpu"</span>
+<span class="k">with</span> <span class="n">sklearn</span><span class="o">.</span><span class="n">config_context</span><span class="p">(</span><span class="n">array_api_dispatch</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+    <span class="n">emeans</span> <span class="o">=</span> <span class="n">EMeans</span><span class="p">(</span><span class="n">n_clusters</span><span class="o">=</span><span class="mi">1024</span><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X</span><span class="p">)</span>
+    <span class="n">labels</span> <span class="o">=</span> <span class="n">emeans</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">X</span><span class="p">)</span>
+<span class="n">emeans</span><span class="o">.</span><span class="n">cluster_centers_</span>  <span class="c1"># a tensor on the device of X</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>Only dense inputs are supported.</p></li>
+<li><p>The random numbers are drawn on the host, in the same order as for NumPy
+inputs, but the results are not identical: the rounding differs, and a
+sample that changes cluster changes the next steps. On devices without
+float64 (Apple GPUs), all the computations are in float32.</p></li>
+<li><p>On GPUs, two fits with the same <code class="docutils literal notranslate"><span class="pre">random_state</span></code> can give different results
+(seen with PyTorch on CUDA, where the inertia changed by up to 1%): the sums
+of the samples of each cluster are added in an order that changes from one
+run to the next. With PyTorch, <code class="docutils literal notranslate"><span class="pre">torch.use_deterministic_algorithms(True)</span></code>
+makes the fits reproducible. They were 10-60% slower with it on an NVIDIA
+L4.</p></li>
+<li><p>With <code class="docutils literal notranslate"><span class="pre">init=&quot;k-means||&quot;</span></code>, the sampling rounds run on the device and the final
+k-means++ on the candidates runs on the host. <code class="docutils literal notranslate"><span class="pre">init=&quot;k-means++&quot;</span></code> copies the
+data to the host.</p></li>
+</ul>
+</section>
+<section id="complexity-and-parallelism">
+<h2>Complexity and parallelism<a class="headerlink" href="#complexity-and-parallelism" title="Link to this heading">#</a></h2>
+<p>This section is about NumPy and SciPy inputs. Array API inputs are computed by
+their library, on their device.</p>
+<p>A fit makes <code class="docutils literal notranslate"><span class="pre">n_epochs</span></code> passes over the data, each with the complexity of an
+iteration of Lloyd’s algorithm, <span class="math notranslate nohighlight">\(O(n_{samples} \, n_{clusters} \,
+n_{features})\)</span> on dense data, and a last one to compute <code class="docutils literal notranslate"><span class="pre">labels_</span></code> and
+<code class="docutils literal notranslate"><span class="pre">inertia_</span></code>. C-contiguous data is not copied, and the additional memory is
+<span class="math notranslate nohighlight">\(O(n_{clusters} \, n_{features} + n_{samples})\)</span>.</p>
+<p>The samples of a mini-batch are assigned to their closest center in chunks of
+256 samples, in parallel with OpenMP, then the centers are updated in parallel.
+<code class="docutils literal notranslate"><span class="pre">EMeans</span></code> uses all the physical cores, or the number of threads set by the
+<code class="docutils literal notranslate"><span class="pre">OMP_NUM_THREADS</span></code> environment variable or by
+<code class="docutils literal notranslate"><span class="pre">threadpoolctl.threadpool_limits(limits=n_threads,</span> <span class="pre">user_api=&quot;openmp&quot;)</span></code>, and at most
+one thread per chunk of a mini-batch: small mini-batches run on few threads.
+The result does not depend on the number of threads.</p>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<aside class="footnote-list brackets">
+<aside class="footnote brackets" id="id4" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">1</a><span class="fn-bracket">]</span></span>
+<p>S. Bessa, P.-E. Mazaré, G. Szilvasy, H. Touvron, D. Picard, M. Douze and
+H. Jégou, “e-means: outperforming k-means (in one-tenth the epochs)”, 2026.
+<a class="reference external" href="https://arxiv.org/abs/2611.09501">arXiv:2611.09501</a>. The reference
+implementation is in <a class="reference external" href="https://github.com/facebookresearch/faiss/tree/main/contrib/e_means">faiss/contrib/e_means</a>.</p>
+</aside>
+<aside class="footnote brackets" id="id5" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">2</a><span class="fn-bracket">]</span></span>
+<p>B. Bahmani, B. Moseley, A. Vattani, R. Kumar and S. Vassilvitskii,
+“Scalable K-Means++”, Proceedings of the VLDB Endowment, 2012.
+<a class="reference external" href="https://arxiv.org/abs/1203.6402">arXiv:1203.6402</a></p>
+</aside>
+</aside>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal" tabindex="-1"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-e-means-does">What e-means does</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#choosing-n-epochs">Choosing <code class="docutils literal notranslate"><span class="pre">n_epochs</span></code></a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#when-to-use-emeans">When to use <code class="docutils literal notranslate"><span class="pre">EMeans</span></code></a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#initialization">Initialization</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#input-data">Input data</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gpu-and-array-api-inputs">GPU and array API inputs</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#complexity-and-parallelism">Complexity and parallelism</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+  <div class="sidebar-secondary-item">
+
+  <div class="tocsection sourcelink">
+    <a href="_sources/user_guide.rst.txt">
+      <i class="fa-solid fa-file-lines"></i> Show Source
+    </a>
+  </div>
+</div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=75c7c72ae941e8b558d8"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=75c7c72ae941e8b558d8"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2026, The sklearn-contrib-emeans developers.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.2.0.
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.24.0.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

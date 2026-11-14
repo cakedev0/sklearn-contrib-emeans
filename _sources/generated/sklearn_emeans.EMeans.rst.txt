@@ -1,0 +1,9 @@
+﻿EMeans
+======
+
+.. currentmodule:: sklearn_emeans
+
+.. autoclass:: EMeans
+
+.. minigallery:: sklearn_emeans.EMeans
+   :add-heading: Examples using ``EMeans``

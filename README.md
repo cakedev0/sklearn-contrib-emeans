@@ -48,9 +48,10 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   clusters with less than about a tenth of the mean cluster size: when the
   data really has small clusters (e.g. outliers in heavy-tailed data), it may
   not reach the best clustering, and a lower value, 0 (no revival) or
-  `"greedy"` do better. `"greedy"` (experimental, its rule may be tuned in
-  future versions) replaces a cluster by half of another one only when this
-  is estimated to lower the inertia, for a longer fit.
+  `"greedy"` do better. `"greedy"` replaces a cluster by half of another one
+  only when this is estimated to lower the inertia, for a longer fit. It is
+  experimental: its algorithm may change from one version to the next, and
+  its results with it.
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.
 - Fitted attributes: `cluster_centers_`, `labels_`, `inertia_` and

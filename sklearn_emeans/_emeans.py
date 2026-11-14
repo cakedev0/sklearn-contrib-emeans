@@ -334,8 +334,11 @@ class EMeans(
         removing a cluster and the gain of splitting one are estimated on a
         sample of the data, during the first half of the fit. It keeps the
         small clusters that are worth keeping and usually gives a lower
-        inertia, for a longer fit. This option is experimental: its rule may
-        be tuned in future versions, which would change its results.
+        inertia, for a longer fit.
+
+        .. warning::
+            'greedy' is experimental: its algorithm may change from one
+            version to the next, and its results with it.
 
     random_state : int, RandomState instance or None, default=None
         Determines random number generation for centroid initialization, the

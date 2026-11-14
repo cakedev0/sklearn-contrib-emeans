@@ -29,7 +29,7 @@ jobs:
       # directory in sys.path: the installed package is documented, not the
       # sources, which lack the compiled kernels.
       - name: Build the documentation
-        run: sphinx-build -W --keep-going -b html doc doc/_build/html
+        run: sphinx-build -W --keep-going -b html -d doc/_build/doctrees doc doc/_build/html
 
       - uses: actions/upload-artifact@v7
         with:
@@ -39,7 +39,7 @@ jobs:
 
   deploy:
     # The gh-pages branch holds a single commit, the documentation of main.
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.repository == 'cakedev0/sklearn-contrib-emeans' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

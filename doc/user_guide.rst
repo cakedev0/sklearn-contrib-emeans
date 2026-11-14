@@ -6,8 +6,9 @@ User guide
 :class:`~sklearn_emeans.EMeans` minimizes the inertia, the sum of the squared
 distances of the samples to their closest center, like
 :class:`~sklearn.cluster.KMeans` and :class:`~sklearn.cluster.MiniBatchKMeans`
-(see :ref:`k_means`). It implements e-means [1]_, which reaches the inertia of
-Lloyd's algorithm in a few passes over the data instead of tens of iterations.
+(see :ref:`k_means`). It implements e-means [1]_, which typically gets close to
+the inertia of Lloyd's algorithm in a few passes over the data instead of tens
+of iterations.
 
 What e-means does
 -----------------
@@ -43,16 +44,15 @@ an iteration of Lloyd's algorithm. Around this update:
 The batch size and the initial step size are not parameters. They are given by
 scaling laws that the authors of e-means fitted as functions of the number of
 samples, of clusters and of epochs. The batch size grows almost linearly with
-the number of samples, is rounded to a power of two, and is 8 times smaller for
-data with up to 16 features. It is stored in `batch_size_` after a fit.
+the number of samples, and is 8 times smaller for data with up to 16 features. It is stored in `batch_size_` after a fit.
 
 Choosing `n_epochs`
 -------------------
 
 `n_epochs`, the number of passes over the data, is the parameter that trades
-fit time for inertia. The authors report that e-means reaches the inertia of
-Lloyd's algorithm after 25 iterations in 1.4 to 2.6 passes over the data on a
-wide range of embedding datasets.
+fit time for inertia. The authors report that e-means goes below the loss of
+Lloyd's algorithm after 25 iterations in 1.4 to 2.6 passes over the data, on
+embedding datasets.
 
 .. figure:: auto_examples/images/sphx_glr_plot_emeans_comparison_001.png
    :target: auto_examples/plot_emeans_comparison.html
@@ -83,13 +83,9 @@ iterations. Prefer `KMeans`:
 
 - on small datasets, which it fits in a negligible time;
 - with sample weights, which `EMeans` does not support yet;
-- when the best clustering has many small clusters. Reviving the dead clusters
-  keeps the running weight of every cluster above a tenth of the mean one, which
-  pushes towards balanced clusters. On the Yolanda dataset (OpenML 42705,
-  standardized: 400,000 samples, 100 features) with 256 clusters, `KMeans`
-  leaves about 20 clusters under a tenth of the mean size and `EMeans` at most
-  2, and from 2 to 50 epochs `EMeans` stays 1 to 2% above the inertia of
-  `KMeans` after 100 iterations;
+- when the best clustering has many small clusters. Reviving the dead clusters,
+  whose running weight is below a tenth of the mean one, pushes towards balanced
+  clusters, so `EMeans` can end above the inertia of `KMeans` on such data;
 - when the centers must be a local minimum of the inertia, where an iteration of
   Lloyd's algorithm no longer moves them. `EMeans` stops after its budget, and
   its centers are not such a minimum. Iterations of Lloyd's algorithm from
@@ -127,8 +123,41 @@ Input data
 converted to CSR. float32 and float64 data are used as they are, and float32
 is faster. The other dtypes are converted to float64.
 
+GPU and array API inputs
+------------------------
+
+`EMeans` also fits on PyTorch tensors and CuPy arrays (and on the arrays of
+other libraries that follow the `array API
+<https://data-apis.org/array-api/>`_), on their device. As for the scikit-learn
+estimators, this must be enabled with `array_api_dispatch=True`, and with
+`SCIPY_ARRAY_API=1` in the environment (see :ref:`array_api`):
+
+.. code-block:: python
+
+    import sklearn
+    import torch
+    from sklearn_emeans import EMeans
+
+    X = torch.asarray(X_numpy, device="mps")  # or "cuda", "xpu"
+    with sklearn.config_context(array_api_dispatch=True):
+        emeans = EMeans(n_clusters=1024).fit(X)
+        labels = emeans.predict(X)
+    emeans.cluster_centers_  # a tensor on the device of X
+
+- Only dense inputs are supported.
+- The random numbers are drawn on the host, in the same order as for NumPy
+  inputs: from the same `random_state`, the results are the same up to
+  rounding. On devices without float64 (Apple GPUs), all the computations are
+  in float32.
+- With `init="k-means||"`, the sampling rounds run on the device and the final
+  k-means++ on the candidates runs on the host. `init="k-means++"` copies the
+  data to the host.
+
 Complexity and parallelism
 --------------------------
+
+This section is about NumPy and SciPy inputs. Array API inputs are computed by
+their library, on their device.
 
 A fit makes `n_epochs` passes over the data, each with the complexity of an
 iteration of Lloyd's algorithm, :math:`O(n_{samples} \, n_{clusters} \,

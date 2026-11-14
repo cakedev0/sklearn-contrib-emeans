@@ -664,8 +664,6 @@ class EMeans(
                     if _is_greedy_step(greedy, step + stop):
                         greedy(centers, weight_ema)
                 step += n_epoch_steps
-        if greedy is not None:
-            greedy.close()
 
         # The final centers are the means of the last epoch's assignments.
         # Centers that got no sample in the last epoch keep their EMA position.
@@ -815,8 +813,6 @@ class EMeans(
                 revive,
             )
             step += n_epoch_steps
-        if greedy is not None:
-            greedy.close()
 
         # The final centers are the means of the last epoch's assignments.
         # Centers that got no sample in the last epoch keep their EMA position.

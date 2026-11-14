@@ -15,12 +15,16 @@ from sklearn_emeans._emeans import (
     _resolve_initial_step_size,
     _revive_dead_clusters,
 )
-from sklearn_emeans._greedy_revival import GreedyRevival, _pair, _trial_split
+from sklearn_emeans._greedy_revival import GreedyRevival, _pair
 from sklearn_emeans._kernels import (
     _emeans_steps,
     _emeans_steps_sparse,
+    _greedy_stats,
+    _greedy_stats_sparse,
     _labels_inertia,
     _labels_inertia_sparse,
+    _trial_splits,
+    _trial_splits_sparse,
     _update_min_distances,
     _update_min_distances_sparse,
 )
@@ -475,24 +479,105 @@ def test_greedy_revival_replaces_useless_cluster():
 
 
 @pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
-def test_trial_split(csr_container):
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("n_threads", [1, 3])
+def test_greedy_stats(csr_container, dtype, n_threads):
     rng = np.random.RandomState(0)
-    X = rng.normal(size=(400, 3)) + 1
-    X[::2, 1] += 10
-    rng.shuffle(X)
-    inertia = ((X - X.mean(axis=0)) ** 2).sum()
-    labels = (X[:, 1] > 6).astype(int)
-    split_inertia = sum(
-        ((X[labels == j] - X[labels == j].mean(axis=0)) ** 2).sum() for j in (0, 1)
+    X = (rng.normal(size=(700, 6)) * [1, 3, 1, 1, 2, 1] + 5).astype(dtype)
+    # The last center gets no row.
+    centers = np.concatenate([X[:9], np.full((1, 6), 100.0)]).astype(dtype)
+    n_clusters = centers.shape[0]
+
+    distances = ((X[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+    expected_labels = distances.argmin(axis=1)
+    sorted_distances = np.sort(distances.astype(np.float64), axis=1)
+    expected_cost = np.bincount(
+        expected_labels,
+        weights=sorted_distances[:, 1] - sorted_distances[:, 0],
+        minlength=n_clusters,
     )
-    feature, std = 1, X[:, 1].std()
-    if csr_container is not None:
-        X = csr_container(X)
+    expected_scatter = np.zeros((n_clusters, 6))
+    for j in range(n_clusters - 1):
+        rows = X[expected_labels == j].astype(np.float64)
+        expected_scatter[j] = ((rows - rows.mean(axis=0)) ** 2).sum(axis=0)
 
-    gain, centers = _trial_split(X, feature, std)
+    labels = np.empty(700, dtype=np.int32)
+    order = np.empty(700, dtype=np.intp)
+    cluster_starts = np.empty(n_clusters + 1, dtype=np.intp)
+    cost, max_scatter = np.empty(n_clusters), np.empty(n_clusters)
+    feature = np.empty(n_clusters, dtype=np.intp)
+    greedy_stats = _greedy_stats if csr_container is None else _greedy_stats_sparse
+    greedy_stats(
+        X if csr_container is None else csr_container(X),
+        centers,
+        labels,
+        order,
+        cluster_starts,
+        cost,
+        max_scatter,
+        feature,
+        n_threads,
+    )
 
-    assert gain == pytest.approx(inertia - split_inertia, rel=0.05)
-    assert_allclose(np.sort(centers[:, 1]), [1, 11], atol=0.3)
+    assert_array_equal(labels, expected_labels)
+    assert_array_equal(np.diff(cluster_starts), np.bincount(labels, minlength=10))
+    for j in range(n_clusters):
+        assert_array_equal(
+            order[cluster_starts[j] : cluster_starts[j + 1]],
+            np.flatnonzero(labels == j),
+        )
+    rtol = 1e-3 if dtype == np.float32 else 1e-9
+    assert_allclose(cost, expected_cost, rtol=rtol)
+    assert_allclose(max_scatter, expected_scatter.max(axis=1), rtol=rtol)
+    assert_array_equal(feature[:-1], expected_scatter.argmax(axis=1)[:-1])
+    assert cost[-1] == max_scatter[-1] == 0
+
+
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_trial_splits(csr_container, dtype):
+    # Two clusters: the second one is made of two groups, 10 apart along the
+    # feature 1.
+    rng = np.random.RandomState(0)
+    X = (rng.normal(size=(600, 3)) + 1).astype(dtype)
+    X[200 + np.flatnonzero(rng.uniform(size=400) < 0.5), 1] += 10
+    order = rng.permutation(600).astype(np.intp)
+    order = np.concatenate([np.sort(order[order < 200]), np.sort(order[order >= 200])])
+    cluster_starts = np.array([0, 200, 600], dtype=np.intp)
+
+    rows = X[200:].astype(np.float64)
+    groups = rows[:, 1] > 6
+    inertia = ((rows - rows.mean(axis=0)) ** 2).sum()
+    split_inertia = sum(
+        ((rows[mask] - rows[mask].mean(axis=0)) ** 2).sum()
+        for mask in (groups, ~groups)
+    )
+
+    gains = np.empty(2)
+    split_centers = np.empty((2, 2, 3))
+    args = (
+        order,
+        cluster_starts,
+        np.array([1, 0], dtype=np.intp),
+        np.array([0, 1], dtype=np.intp),
+        np.array([1.0, rows[:, 1].std()]),
+        3,
+        gains,
+        split_centers,
+        2,
+    )
+    if csr_container is None:
+        _trial_splits(X, *args)
+    else:
+        X_csr = csr_container(X)
+        _trial_splits_sparse(X_csr.data, X_csr.indices, X_csr.indptr, 3, *args)
+
+    # The split of the second cluster separates its two groups.
+    assert gains[0] == pytest.approx(inertia - split_inertia, rel=0.05)
+    assert_allclose(split_centers[0, :, 1], [11, 1], atol=0.3)
+    assert_allclose(split_centers[0][:, [0, 2]], 1, atol=0.3)
+    # Not much to gain from the split of a Gaussian blob in 3 dimensions.
+    assert 0 < gains[1] < 0.5 * 200 * 3
 
 
 def test_pair():

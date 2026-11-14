@@ -2,9 +2,11 @@
 
 # SPDX-License-Identifier: BSD-3-Clause
 
+import ctypes
 import math
 import os
-from functools import partial
+import re
+from functools import cache, partial
 from numbers import Integral, Real
 
 import numpy as np
@@ -88,18 +90,60 @@ def _threadpool_controller():
     return _THREADPOOL_CONTROLLER
 
 
-def _openmp_effective_n_threads():
+@cache
+def _openblas_max_threads():
+    """Smallest compiled thread limit of the loaded OpenBLAS, None without it.
+
+    This is the `MAX_THREADS` of `openblas_get_config()`, 64 for the OpenBLAS of
+    the SciPy wheels. It doesn't change with `OPENBLAS_NUM_THREADS` or
+    threadpoolctl.
+    """
+    limits = []
+    for controller in _threadpool_controller().lib_controllers:
+        if controller.internal_api != "openblas":
+            continue
+        # The symbols of the OpenBLAS of the NumPy and SciPy wheels have a
+        # prefix and a suffix.
+        for prefix in ("", "scipy_"):
+            for suffix in ("", "64_", "_64"):
+                get_config = getattr(
+                    controller.dynlib, f"{prefix}openblas_get_config{suffix}", None
+                )
+                if get_config is None:
+                    continue
+                get_config.restype = ctypes.c_char_p
+                match = re.search(rb"MAX_THREADS=(\d+)", get_config() or b"")
+                if match is not None:
+                    limits.append(int(match.group(1)))
+    return min(limits, default=None)
+
+
+def _openmp_effective_n_threads(blas=True):
     """Number of OpenMP threads, as in scikit-learn.
 
     `omp_get_max_threads()` if `OMP_NUM_THREADS` is set, otherwise bounded by
     the number of physical cores (taking cgroups quotas into account).
+
+    If `blas` is true, the threads call BLAS: their number is also bounded by
+    the compiled thread limit of OpenBLAS. OpenBLAS up to 0.3.34 can crash when
+    more threads than this limit call it at the same time, even with one BLAS
+    thread each: https://github.com/OpenMathLib/OpenBLAS/issues/5958.
     """
     global _N_CPUS
     if os.getenv("OMP_NUM_THREADS"):
-        return _omp_max_threads()
-    if _N_CPUS is None:
-        _N_CPUS = cpu_count(only_physical_cores=True)
-    return max(1, min(_omp_max_threads(), _N_CPUS))
+        n_threads = _omp_max_threads()
+    else:
+        if _N_CPUS is None:
+            _N_CPUS = cpu_count(only_physical_cores=True)
+        n_threads = max(1, min(_omp_max_threads(), _N_CPUS))
+    if blas:
+        try:
+            openblas_max_threads = _openblas_max_threads()
+        except Exception:
+            openblas_max_threads = None
+        if openblas_max_threads:
+            n_threads = min(n_threads, openblas_max_threads)
+    return n_threads
 
 
 def _labels_inertia_threadpool_limit(X, centers, n_threads):
@@ -330,10 +374,12 @@ class EMeans(
 
     For array API inputs, the Cython kernels are replaced by array operations
     of the library of the input. The random numbers are drawn on the host in
-    the same order, so the results are the same up to rounding. On devices
-    without float64, the EMA weights and the sums of the last epoch are in
-    float32. With `init="k-means||"`, the final k-means++ on the candidates
-    runs on the host, and `init="k-means++"` copies the data to the host.
+    the same order, but the results are not identical since the rounding
+    differs. On GPUs, two fits with the same `random_state` can also give
+    different results. On devices without float64, the EMA weights and the
+    sums of the last epoch are in float32. With `init="k-means||"`, the final
+    k-means++ on the candidates runs on the host, and `init="k-means++"`
+    copies the data to the host.
 
     References
     ----------
@@ -385,9 +431,11 @@ class EMeans(
         if (
             not isinstance(self.n_epochs, Real)
             or isinstance(self.n_epochs, bool)
-            or not self.n_epochs > 0
+            or not 0 < self.n_epochs < math.inf
         ):
-            raise ValueError(f"n_epochs must be a float > 0, got {self.n_epochs!r}.")
+            raise ValueError(
+                f"n_epochs must be a finite float > 0, got {self.n_epochs!r}."
+            )
         if isinstance(self.init, str):
             if self.init not in ("random", "k-means++", "k-means||"):
                 raise ValueError(
@@ -494,7 +542,8 @@ class EMeans(
                 f"n_samples={n_samples} should be >= n_clusters={n_clusters}."
             )
         random_state = check_random_state(self.random_state)
-        max_n_threads = _openmp_effective_n_threads()
+        # The kernels for sparse X don't call BLAS.
+        max_n_threads = _openmp_effective_n_threads(blas=not sp.issparse(X))
 
         centers = np.array(
             self._init_centers(X, random_state), dtype=X.dtype, order="C", copy=True
@@ -747,7 +796,7 @@ class EMeans(
         if xp is not None:
             return _array_api.labels_inertia(xp, X, centers)[0]
         labels, _ = _labels_inertia_threadpool_limit(
-            X, centers, _openmp_effective_n_threads()
+            X, centers, _openmp_effective_n_threads(blas=not sp.issparse(X))
         )
         return labels
 
@@ -794,6 +843,6 @@ class EMeans(
         if xp is not None:
             return -_array_api.labels_inertia(xp, X, centers)[1]
         _, inertia = _labels_inertia_threadpool_limit(
-            X, centers, _openmp_effective_n_threads()
+            X, centers, _openmp_effective_n_threads(blas=not sp.issparse(X))
         )
         return -inertia

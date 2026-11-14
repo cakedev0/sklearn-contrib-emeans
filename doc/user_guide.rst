@@ -123,6 +123,8 @@ Input data
 converted to CSR. float32 and float64 data are used as they are, and float32
 is faster. The other dtypes are converted to float64.
 
+.. _array_api_inputs:
+
 GPU and array API inputs
 ------------------------
 

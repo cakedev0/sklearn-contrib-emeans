@@ -10,7 +10,7 @@ from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
 from threadpoolctl import threadpool_limits
 
-from sklearn_emeans import EMeans
+from sklearn_emeans import EMeans, _emeans
 from sklearn_emeans._emeans import (
     _epochs_n_rows,
     _resolve_batch_size,
@@ -626,6 +626,35 @@ def test_kmeans_parallel_sparse_matches_dense(dtype, csr_container):
     inertia = EMeans(n_clusters=30, init=centers).fit(X).inertia_
     inertia_csr = EMeans(n_clusters=30, init=centers_csr).fit(X).inertia_
     assert inertia_csr == pytest.approx(inertia, rel=0.01)
+
+
+def test_openblas_max_threads():
+    max_threads = _emeans._openblas_max_threads()
+    blas = [
+        info["internal_api"]
+        for info in _emeans._threadpool_controller().info()
+        if info["user_api"] == "blas"
+    ]
+    if "openblas" in blas:
+        assert max_threads >= 1
+    else:
+        assert max_threads is None
+
+
+def test_n_threads_bounded_by_openblas_max_threads(monkeypatch):
+    # No more threads than the compiled limit of OpenBLAS in the kernels that
+    # call BLAS, see _openmp_effective_n_threads.
+    monkeypatch.setattr(_emeans, "_omp_max_threads", lambda: 8)
+    monkeypatch.setattr(_emeans, "_N_CPUS", 8)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(_emeans, "_openblas_max_threads", lambda: 2)
+    assert _emeans._openmp_effective_n_threads() == 2
+    assert _emeans._openmp_effective_n_threads(blas=False) == 8
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    assert _emeans._openmp_effective_n_threads() == 2
+
+    monkeypatch.setattr(_emeans, "_openblas_max_threads", lambda: None)
+    assert _emeans._openmp_effective_n_threads() == 8
 
 
 _ALLOCATION_FAILURE_CODE = """

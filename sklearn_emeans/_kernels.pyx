@@ -46,9 +46,11 @@ cdef extern from *:
     #include <omp.h>
     static int emeans_omp_max_threads(void) { return omp_get_max_threads(); }
     static int emeans_omp_thread_num(void) { return omp_get_thread_num(); }
+    static int emeans_omp_num_threads(void) { return omp_get_num_threads(); }
     #else
     static int emeans_omp_max_threads(void) { return 1; }
     static int emeans_omp_thread_num(void) { return 0; }
+    static int emeans_omp_num_threads(void) { return 1; }
     #endif
 
     /* Atomic counters shared by the threads of `_run_steps`. */
@@ -91,12 +93,29 @@ cdef extern from *:
             }
         }
     }
+
+    /* Called by each thread of a parallel region once it has allocated its
+       buffers, with a non-zero `failed` if an allocation failed. Waits for
+       all the threads of the team, then returns whether all the allocations
+       succeeded: no thread starts to work when one of them lacks a buffer. */
+    static int emeans_buffers_ready(Py_ssize_t *n_ready, Py_ssize_t *n_failed,
+                                    int failed) {
+        if (failed) {
+            emeans_fetch_add(n_failed, 1);
+        }
+        emeans_fetch_add(n_ready, 1);
+        emeans_wait(n_ready, emeans_omp_num_threads());
+        return emeans_load(n_failed) == 0;
+    }
     """
     int emeans_omp_max_threads() noexcept nogil
     int emeans_omp_thread_num() noexcept nogil
     intp_t emeans_fetch_add(intp_t *counter, intp_t value) noexcept nogil
     intp_t emeans_load(intp_t *counter) noexcept nogil
     void emeans_wait(intp_t *counter, intp_t target) noexcept nogil
+    bint emeans_buffers_ready(
+        intp_t *n_ready, intp_t *n_failed, bint failed
+    ) noexcept nogil
 
 
 # Number of rows assigned by one GEMM call.
@@ -120,39 +139,6 @@ cdef enum:
 def _omp_max_threads():
     """omp_get_max_threads(), or 1 if built without OpenMP."""
     return emeans_omp_max_threads()
-
-
-cdef void** _malloc_thread_buffers(int n_threads, size_t size) noexcept nogil:
-    """One buffer of `size` bytes per thread, or NULL if an allocation fails.
-
-    The buffers are allocated before the parallel region, so that no thread
-    starts to work when one of them lacks its buffers. Thread `t` takes
-    `buffers[t]`, with `t` its `emeans_omp_thread_num()`. The pages of a
-    buffer are still placed on the NUMA node of its thread, which is the
-    first to write to it.
-    """
-    cdef:
-        void **buffers = <void**> calloc(n_threads, sizeof(void*))
-        int t
-
-    if buffers == NULL:
-        return NULL
-    for t in range(n_threads):
-        buffers[t] = malloc(size)
-        if buffers[t] == NULL:
-            _free_thread_buffers(buffers, n_threads)
-            return NULL
-    return buffers
-
-
-cdef void _free_thread_buffers(void **buffers, int n_threads) noexcept nogil:
-    cdef int t
-
-    if buffers == NULL:
-        return
-    for t in range(n_threads):
-        free(buffers[t])
-    free(buffers)
 
 
 def _chunk_size():
@@ -267,29 +253,22 @@ def _labels_inertia(
         intp_t n_features = centers.shape[1]
         intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
         intp_t chunk_idx, start, j
+        intp_t n_ready = 0
+        intp_t n_failed = 0
         double inertia = 0.0
         double *chunk_inertia
         floating *centers_squared_norms
-        floating **thread_distances
         floating *distances = NULL
 
     if n_samples == 0:
         return 0.0
 
-    n_threads = max(1, min(n_threads, n_chunks))
+    n_threads = min(n_threads, n_chunks)
     chunk_inertia = <double*> malloc(n_chunks * sizeof(double))
     centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
-    thread_distances = <floating**> _malloc_thread_buffers(
-        n_threads, CHUNK_SIZE * n_clusters * sizeof(floating)
-    )
-    if (
-        chunk_inertia == NULL
-        or centers_squared_norms == NULL
-        or thread_distances == NULL
-    ):
+    if chunk_inertia == NULL or centers_squared_norms == NULL:
         free(chunk_inertia)
         free(centers_squared_norms)
-        _free_thread_buffers(<void**> thread_distances, n_threads)
         raise MemoryError()
 
     with nogil:
@@ -297,29 +276,34 @@ def _labels_inertia(
             centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
 
         with parallel(num_threads=n_threads):
-            distances = thread_distances[emeans_omp_thread_num()]
+            distances = <floating*> malloc(CHUNK_SIZE * n_clusters * sizeof(floating))
 
-            for chunk_idx in prange(n_chunks, schedule='static'):
-                start = chunk_idx * CHUNK_SIZE
-                _assign_rows(
-                    &X[start, 0],
-                    min(CHUNK_SIZE, n_samples - start),
-                    &centers[0, 0],
-                    centers_squared_norms,
-                    n_clusters,
-                    n_features,
-                    &labels[start],
-                    distances,
-                    &chunk_inertia[chunk_idx],
-                )
+            if emeans_buffers_ready(&n_ready, &n_failed, distances == NULL):
+                for chunk_idx in prange(n_chunks, schedule='static'):
+                    start = chunk_idx * CHUNK_SIZE
+                    _assign_rows(
+                        &X[start, 0],
+                        min(CHUNK_SIZE, n_samples - start),
+                        &centers[0, 0],
+                        centers_squared_norms,
+                        n_clusters,
+                        n_features,
+                        &labels[start],
+                        distances,
+                        &chunk_inertia[chunk_idx],
+                    )
 
-        # Sum the inertias of the chunks in a fixed order.
-        for chunk_idx in range(n_chunks):
-            inertia += chunk_inertia[chunk_idx]
+            free(distances)
+
+        if not n_failed:
+            # Sum the inertias of the chunks in a fixed order.
+            for chunk_idx in range(n_chunks):
+                inertia += chunk_inertia[chunk_idx]
 
     free(chunk_inertia)
     free(centers_squared_norms)
-    _free_thread_buffers(<void**> thread_distances, n_threads)
+    if n_failed:
+        raise MemoryError()
     return inertia
 
 
@@ -392,37 +376,33 @@ def _labels_inertia_sparse(
         intp_t n_features = centers.shape[1]
         intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
         intp_t chunk_idx, start, j
+        intp_t n_ready = 0
+        intp_t n_failed = 0
         double inertia = 0.0
         double *chunk_inertia
         floating *centers_T
         floating *centers_squared_norms
         double *centers_squared_norms_64
-        floating **thread_distances
         floating *distances = NULL
 
     if n_samples == 0:
         return 0.0
 
-    n_threads = max(1, min(n_threads, n_chunks))
+    n_threads = min(n_threads, n_chunks)
     chunk_inertia = <double*> malloc(n_chunks * sizeof(double))
     centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
     centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
     centers_squared_norms_64 = <double*> malloc(n_clusters * sizeof(double))
-    thread_distances = <floating**> _malloc_thread_buffers(
-        n_threads, n_clusters * sizeof(floating)
-    )
     if (
         chunk_inertia == NULL
         or centers_T == NULL
         or centers_squared_norms == NULL
         or centers_squared_norms_64 == NULL
-        or thread_distances == NULL
     ):
         free(chunk_inertia)
         free(centers_T)
         free(centers_squared_norms)
         free(centers_squared_norms_64)
-        _free_thread_buffers(<void**> thread_distances, n_threads)
         raise MemoryError()
 
     with nogil:
@@ -434,35 +414,40 @@ def _labels_inertia_sparse(
         _transpose(&centers[0, 0], n_clusters, n_features, centers_T, n_threads)
 
         with parallel(num_threads=n_threads):
-            distances = thread_distances[emeans_omp_thread_num()]
+            distances = <floating*> malloc(n_clusters * sizeof(floating))
 
-            for chunk_idx in prange(n_chunks, schedule='static'):
-                start = chunk_idx * CHUNK_SIZE
-                _assign_rows_sparse(
-                    &X_data[0],
-                    &X_indices[0],
-                    &X_indptr[0],
-                    NULL,
-                    start,
-                    min(CHUNK_SIZE, n_samples - start),
-                    centers_T,
-                    centers_squared_norms,
-                    centers_squared_norms_64,
-                    n_clusters,
-                    &labels[start],
-                    distances,
-                    &chunk_inertia[chunk_idx],
-                )
+            if emeans_buffers_ready(&n_ready, &n_failed, distances == NULL):
+                for chunk_idx in prange(n_chunks, schedule='static'):
+                    start = chunk_idx * CHUNK_SIZE
+                    _assign_rows_sparse(
+                        &X_data[0],
+                        &X_indices[0],
+                        &X_indptr[0],
+                        NULL,
+                        start,
+                        min(CHUNK_SIZE, n_samples - start),
+                        centers_T,
+                        centers_squared_norms,
+                        centers_squared_norms_64,
+                        n_clusters,
+                        &labels[start],
+                        distances,
+                        &chunk_inertia[chunk_idx],
+                    )
 
-        # Sum the inertias of the chunks in a fixed order.
-        for chunk_idx in range(n_chunks):
-            inertia += chunk_inertia[chunk_idx]
+            free(distances)
+
+        if not n_failed:
+            # Sum the inertias of the chunks in a fixed order.
+            for chunk_idx in range(n_chunks):
+                inertia += chunk_inertia[chunk_idx]
 
     free(chunk_inertia)
     free(centers_T)
     free(centers_squared_norms)
     free(centers_squared_norms_64)
-    _free_thread_buffers(<void**> thread_distances, n_threads)
+    if n_failed:
+        raise MemoryError()
     return inertia
 
 
@@ -488,11 +473,11 @@ def _update_min_distances(
         intp_t n_features = X.shape[1]
         intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
         intp_t chunk_idx, start, n_rows, r, i, j
+        intp_t n_ready = 0
+        intp_t n_failed = 0
         int *labels_ptr = NULL
         int *chunk_labels = NULL
         floating *centers_squared_norms
-        floating **thread_distances
-        int **thread_chunk_labels
         floating *distances = NULL
         floating dist
 
@@ -502,22 +487,9 @@ def _update_min_distances(
     if labels is not None:
         labels_ptr = &labels[0]
 
-    n_threads = max(1, min(n_threads, n_chunks))
+    n_threads = min(n_threads, n_chunks)
     centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
-    thread_distances = <floating**> _malloc_thread_buffers(
-        n_threads, CHUNK_SIZE * n_clusters * sizeof(floating)
-    )
-    thread_chunk_labels = <int**> _malloc_thread_buffers(
-        n_threads, CHUNK_SIZE * sizeof(int)
-    )
-    if (
-        centers_squared_norms == NULL
-        or thread_distances == NULL
-        or thread_chunk_labels == NULL
-    ):
-        free(centers_squared_norms)
-        _free_thread_buffers(<void**> thread_distances, n_threads)
-        _free_thread_buffers(<void**> thread_chunk_labels, n_threads)
+    if centers_squared_norms == NULL:
         raise MemoryError()
 
     with nogil:
@@ -525,39 +497,45 @@ def _update_min_distances(
             centers_squared_norms[j] = _squared_norm(&centers[j, 0], n_features)
 
         with parallel(num_threads=n_threads):
-            distances = thread_distances[emeans_omp_thread_num()]
-            chunk_labels = thread_chunk_labels[emeans_omp_thread_num()]
+            distances = <floating*> malloc(CHUNK_SIZE * n_clusters * sizeof(floating))
+            chunk_labels = <int*> malloc(CHUNK_SIZE * sizeof(int))
 
-            for chunk_idx in prange(n_chunks, schedule='static'):
-                start = chunk_idx * CHUNK_SIZE
-                n_rows = min(CHUNK_SIZE, n_samples - start)
-                # distances = ||c||² - 2 x.c, and its argmin
-                _assign_rows(
-                    &X[start, 0],
-                    n_rows,
-                    &centers[0, 0],
-                    centers_squared_norms,
-                    n_clusters,
-                    n_features,
-                    chunk_labels,
-                    distances,
-                    NULL,
-                )
-                for r in range(n_rows):
-                    i = start + r
-                    # d² = max(||x||² + ||c||² - 2 x.c, 0)
-                    dist = (_squared_norm(&X[i, 0], n_features)
-                            + distances[r * n_clusters + chunk_labels[r]])
-                    if dist < 0:
-                        dist = 0
-                    if dist < min_distances[i]:
-                        min_distances[i] = dist
-                        if labels_ptr != NULL:
-                            labels_ptr[i] = label_offset + chunk_labels[r]
+            if emeans_buffers_ready(
+                &n_ready, &n_failed, distances == NULL or chunk_labels == NULL
+            ):
+                for chunk_idx in prange(n_chunks, schedule='static'):
+                    start = chunk_idx * CHUNK_SIZE
+                    n_rows = min(CHUNK_SIZE, n_samples - start)
+                    # distances = ||c||² - 2 x.c, and its argmin
+                    _assign_rows(
+                        &X[start, 0],
+                        n_rows,
+                        &centers[0, 0],
+                        centers_squared_norms,
+                        n_clusters,
+                        n_features,
+                        chunk_labels,
+                        distances,
+                        NULL,
+                    )
+                    for r in range(n_rows):
+                        i = start + r
+                        # d² = max(||x||² + ||c||² - 2 x.c, 0)
+                        dist = (_squared_norm(&X[i, 0], n_features)
+                                + distances[r * n_clusters + chunk_labels[r]])
+                        if dist < 0:
+                            dist = 0
+                        if dist < min_distances[i]:
+                            min_distances[i] = dist
+                            if labels_ptr != NULL:
+                                labels_ptr[i] = label_offset + chunk_labels[r]
+
+            free(distances)
+            free(chunk_labels)
 
     free(centers_squared_norms)
-    _free_thread_buffers(<void**> thread_distances, n_threads)
-    _free_thread_buffers(<void**> thread_chunk_labels, n_threads)
+    if n_failed:
+        raise MemoryError()
 
 
 def _update_min_distances_sparse(
@@ -582,13 +560,14 @@ def _update_min_distances_sparse(
         intp_t n_clusters = centers.shape[0]
         intp_t n_features = centers.shape[1]
         intp_t i, j
+        intp_t n_ready = 0
+        intp_t n_failed = 0
         int label
         double dist
         int *labels_ptr = NULL
         floating *centers_T
         floating *centers_squared_norms
         double *centers_squared_norms_64
-        floating **thread_distances
         floating *distances = NULL
 
     if n_samples == 0 or n_clusters == 0:
@@ -597,23 +576,18 @@ def _update_min_distances_sparse(
     if labels is not None:
         labels_ptr = &labels[0]
 
-    n_threads = max(1, min(n_threads, (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE))
+    n_threads = min(n_threads, (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE)
     centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
     centers_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
     centers_squared_norms_64 = <double*> malloc(n_clusters * sizeof(double))
-    thread_distances = <floating**> _malloc_thread_buffers(
-        n_threads, n_clusters * sizeof(floating)
-    )
     if (
         centers_T == NULL
         or centers_squared_norms == NULL
         or centers_squared_norms_64 == NULL
-        or thread_distances == NULL
     ):
         free(centers_T)
         free(centers_squared_norms)
         free(centers_squared_norms_64)
-        _free_thread_buffers(<void**> thread_distances, n_threads)
         raise MemoryError()
 
     with nogil:
@@ -625,37 +599,43 @@ def _update_min_distances_sparse(
         _transpose(&centers[0, 0], n_clusters, n_features, centers_T, n_threads)
 
         with parallel(num_threads=n_threads):
-            distances = thread_distances[emeans_omp_thread_num()]
+            distances = <floating*> malloc(n_clusters * sizeof(floating))
 
-            for i in prange(n_samples, schedule='static', chunksize=CHUNK_SIZE):
-                # Assigned here so that they are private to each thread.
-                label = 0
-                dist = 0.0
-                # label = argmin_j ||x_i - c_j||², dist = ||x_i - c_label||²
-                _assign_rows_sparse(
-                    &X_data[0],
-                    &X_indices[0],
-                    &X_indptr[0],
-                    NULL,
-                    i,
-                    1,
-                    centers_T,
-                    centers_squared_norms,
-                    centers_squared_norms_64,
-                    n_clusters,
-                    &label,
-                    distances,
-                    &dist,
-                )
-                if dist < min_distances[i]:
-                    min_distances[i] = <floating> dist
-                    if labels_ptr != NULL:
-                        labels_ptr[i] = label_offset + label
+            if emeans_buffers_ready(&n_ready, &n_failed, distances == NULL):
+                for i in prange(
+                    n_samples, schedule='static', chunksize=CHUNK_SIZE
+                ):
+                    # Assigned here so that they are private to each thread.
+                    label = 0
+                    dist = 0.0
+                    # label = argmin_j ||x_i - c_j||², dist = ||x_i - c_label||²
+                    _assign_rows_sparse(
+                        &X_data[0],
+                        &X_indices[0],
+                        &X_indptr[0],
+                        NULL,
+                        i,
+                        1,
+                        centers_T,
+                        centers_squared_norms,
+                        centers_squared_norms_64,
+                        n_clusters,
+                        &label,
+                        distances,
+                        &dist,
+                    )
+                    if dist < min_distances[i]:
+                        min_distances[i] = <floating> dist
+                        if labels_ptr != NULL:
+                            labels_ptr[i] = label_offset + label
+
+            free(distances)
 
     free(centers_T)
     free(centers_squared_norms)
     free(centers_squared_norms_64)
-    _free_thread_buffers(<void**> thread_distances, n_threads)
+    if n_failed:
+        raise MemoryError()
 
 
 cdef int _run_steps(
@@ -708,6 +688,8 @@ cdef int _run_steps(
         # numbers of rows, as with a guided schedule.
         intp_t block_size = max(1, n_clusters // (16 * n_threads))
         intp_t failed = 0
+        intp_t n_ready = 0
+        intp_t n_failed = 0
         list errors = []
         int *labels = <int*> malloc(max_batch_size * sizeof(int))
         intp_t *cluster_starts = <intp_t*> malloc((n_clusters + 1) * sizeof(intp_t))
@@ -717,26 +699,12 @@ cdef int _run_steps(
             n_clusters * sizeof(floating)
         )
         floating *centers_T = NULL
-        floating **thread_X_chunk = NULL
-        floating **thread_distances
-        double **thread_sums
         floating *X_chunk = NULL
         floating *distances = NULL
         double *sums = NULL
 
-    n_threads = max(1, n_threads)
     if is_sparse:
         centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
-    else:
-        thread_X_chunk = <floating**> _malloc_thread_buffers(
-            n_threads, CHUNK_SIZE * n_features * sizeof(floating)
-        )
-    thread_distances = <floating**> _malloc_thread_buffers(
-        n_threads, distances_size * sizeof(floating)
-    )
-    thread_sums = <double**> _malloc_thread_buffers(
-        n_threads, n_features * sizeof(double)
-    )
 
     if (
         labels == NULL
@@ -745,9 +713,6 @@ cdef int _run_steps(
         or counters == NULL
         or centers_squared_norms == NULL
         or (is_sparse and centers_T == NULL)
-        or (not is_sparse and thread_X_chunk == NULL)
-        or thread_distances == NULL
-        or thread_sums == NULL
     ):
         free(labels)
         free(cluster_starts)
@@ -755,25 +720,31 @@ cdef int _run_steps(
         free(counters)
         free(centers_squared_norms)
         free(centers_T)
-        _free_thread_buffers(<void**> thread_X_chunk, n_threads)
-        _free_thread_buffers(<void**> thread_distances, n_threads)
-        _free_thread_buffers(<void**> thread_sums, n_threads)
         raise MemoryError()
 
     with nogil, parallel(num_threads=n_threads):
         if not is_sparse:
-            X_chunk = thread_X_chunk[emeans_omp_thread_num()]
-        distances = thread_distances[emeans_omp_thread_num()]
-        sums = thread_sums[emeans_omp_thread_num()]
+            X_chunk = <floating*> malloc(CHUNK_SIZE * n_features * sizeof(floating))
+        distances = <floating*> malloc(distances_size * sizeof(floating))
+        sums = <double*> malloc(n_features * sizeof(double))
 
-        _steps_worker(
-            X, X_data, X_indices, X_indptr, rows, n_rows, batch_size, centers,
-            n_clusters, n_features, weight_ema, step_sizes, n_steps, epoch_sums,
-            epoch_counts, first_step, revival_period, <PyObject*> revive,
-            <PyObject*> errors, &failed, counters, block_size, labels,
-            cluster_starts, batch_order, centers_squared_norms, centers_T,
-            X_chunk, distances, sums,
-        )
+        if emeans_buffers_ready(
+            &n_ready,
+            &n_failed,
+            distances == NULL or sums == NULL or (not is_sparse and X_chunk == NULL),
+        ):
+            _steps_worker(
+                X, X_data, X_indices, X_indptr, rows, n_rows, batch_size,
+                centers, n_clusters, n_features, weight_ema, step_sizes,
+                n_steps, epoch_sums, epoch_counts, first_step, revival_period,
+                <PyObject*> revive, <PyObject*> errors, &failed, counters,
+                block_size, labels, cluster_starts, batch_order,
+                centers_squared_norms, centers_T, X_chunk, distances, sums,
+            )
+
+        free(X_chunk)
+        free(distances)
+        free(sums)
 
     free(labels)
     free(cluster_starts)
@@ -781,12 +752,11 @@ cdef int _run_steps(
     free(counters)
     free(centers_squared_norms)
     free(centers_T)
-    _free_thread_buffers(<void**> thread_X_chunk, n_threads)
-    _free_thread_buffers(<void**> thread_distances, n_threads)
-    _free_thread_buffers(<void**> thread_sums, n_threads)
 
     if errors:
         raise errors[0]
+    if n_failed:
+        raise MemoryError()
     return 0
 
 

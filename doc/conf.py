@@ -29,6 +29,7 @@ default_role = "literal"
 
 html_theme = "pydata_sphinx_theme"
 html_title = project
+html_favicon = "_static/favicon.svg"
 html_theme_options = {
     "github_url": "https://github.com/cakedev0/sklearn-contrib-emeans",
     "show_toc_level": 2,

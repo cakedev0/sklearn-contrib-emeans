@@ -36,6 +36,7 @@ an iteration of Lloyd's algorithm. Around this update:
 - Every 5 mini-batches, the dead clusters, whose running weight is below a
   tenth of the mean one, are revived: each takes half of a heavier cluster,
   which is split in two. Clusters are not revived on data with 1 or 2 features.
+  The `revival` parameter sets this threshold (0 for no revival).
 - At the end of the last epoch, each center is set to the mean of the samples
   assigned to it during that epoch.
 - `labels_` and `inertia_` are then computed with one more pass over the data,
@@ -85,7 +86,9 @@ iterations. Prefer `KMeans`:
 - with sample weights, which `EMeans` does not support yet;
 - when the best clustering has many small clusters. Reviving the dead clusters,
   whose running weight is below a tenth of the mean one, pushes towards balanced
-  clusters, so `EMeans` can end above the inertia of `KMeans` on such data;
+  clusters, so `EMeans` can end above the inertia of `KMeans` on such data. Try
+  `revival=0` or the experimental `revival="greedy"` first: they often close the
+  gap;
 - when the centers must be a local minimum of the inertia, where an iteration of
   Lloyd's algorithm no longer moves them. `EMeans` stops after its budget, and
   its centers are not such a minimum. Iterations of Lloyd's algorithm from

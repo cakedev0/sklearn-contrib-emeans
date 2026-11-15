@@ -331,7 +331,7 @@ def emeans_steps(
     return centers, weight_ema, epoch_sums, epoch_counts
 
 
-def revive_dead_clusters(xp, centers, weight_ema, random_state):
+def revive_dead_clusters(xp, centers, weight_ema, random_state, threshold):
     """Split heavy clusters to replace the dead ones.
 
     Same as `_emeans._revive_dead_clusters`, which this function runs on the
@@ -340,7 +340,7 @@ def revive_dead_clusters(xp, centers, weight_ema, random_state):
     from sklearn_emeans._emeans import _revival_indices, _split_centers
 
     indices = _revival_indices(
-        to_numpy(xp, weight_ema).astype(np.float64), random_state
+        to_numpy(xp, weight_ema).astype(np.float64), random_state, threshold
     )
     if indices is None:
         return centers, weight_ema
@@ -359,6 +359,22 @@ def revive_dead_clusters(xp, centers, weight_ema, random_state):
     weight_ema = _set_rows(xp, weight_ema, donor_indices, donor_weights)
     weight_ema = _set_rows(xp, weight_ema, dead_indices, donor_weights)
     return centers, weight_ema
+
+
+def revive_greedy(xp, greedy, centers, weight_ema):
+    """Greedy revival of the clusters, which runs on the host.
+
+    `greedy` is a `_greedy_revival.GreedyRevival`: only the centers and the
+    EMA weights are copied to the host, where it has its sample of the data.
+    """
+    centers_host = np.array(to_numpy(xp, centers))
+    weight_ema_host = np.array(to_numpy(xp, weight_ema), dtype=np.float64)
+    if greedy(centers_host, weight_ema_host) == 0:
+        return centers, weight_ema
+    return (
+        from_numpy(xp, centers_host, dtype_name(xp, centers), device(centers)),
+        from_numpy(xp, weight_ema_host, dtype_name(xp, weight_ema), device(weight_ema)),
+    )
 
 
 def labels_inertia(xp, X, centers):

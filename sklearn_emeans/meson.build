@@ -19,6 +19,7 @@ py.install_sources(
     '__init__.py',
     '_array_api.py',
     '_emeans.py',
+    '_greedy_revival.py',
     '_kmeans_parallel.py',
     '_kmeans_plusplus.py',
   ],

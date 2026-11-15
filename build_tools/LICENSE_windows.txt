@@ -3,7 +3,7 @@ This binary distribution of sklearn-contrib-emeans also bundles the following so
 ----
 
 Name: Microsoft Visual C++ Runtime Files
-Files: sklearn\.libs\*.dll
+Files: sklearn_contrib_emeans.libs\*.dll
 Availability: https://learn.microsoft.com/en-us/visualstudio/releases/2015/2015-redistribution-vs
 
 Subject to the License Terms for the software, you may copy and distribute with your

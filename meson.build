@@ -1,7 +1,7 @@
 project(
   'sklearn-contrib-emeans',
   'c', 'cython',
-  version: '0.3.1',
+  version: '0.3.2',
   license: 'BSD-3-Clause',
   meson_version: '>= 1.1.0',
   default_options: ['buildtype=release', 'c_std=c11'],

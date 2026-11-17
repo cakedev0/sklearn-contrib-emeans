@@ -131,6 +131,14 @@ plt.show()
 # centers of the blobs that have two of them to the empty blobs. It ends close
 # to the reference from either initialization.
 #
+# In the animation at the top, the inertia jumps up after some greedy revivals.
+# The cost of removing a cluster is estimated as if it were the only one
+# removed, so a revival can remove both centers of a blob that has two, and
+# leave the blob empty. The next revivals put a center back in it. Like the
+# jumps of simulated annealing, these moves can help the fit escape a local
+# minimum: after the next revivals, the inertia ends below where it was before
+# the jump.
+#
 # Repeat with other random states
 # -------------------------------
 #

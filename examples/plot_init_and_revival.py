@@ -3,12 +3,27 @@
 Initialization and revival on 2-D data
 =======================================
 
-On data with 1 or 2 features, :class:`~sklearn_emeans.EMeans` doesn't revive
-the dead clusters with the default `revival`. With the default `init="random"`,
-the centers then stay in the regions where they start: several in the dense
-regions, none in the sparse ones. This example shows, on 2-D blobs of very
-different sizes, how `init="k-means||"` and `revival="greedy"` get close to the
-best clustering.
+E-means was mostly meant for embeddings: its authors report its results on
+embedding datasets, where the defaults of :class:`~sklearn_emeans.EMeans`,
+random initial centers and the revival of the clusters below a tenth of the
+mean weight, work well. On other real data, they don't always reach a good
+inertia, which is why `EMeans` has two more options:
+
+- `init="k-means||"`: on data with many dense regions, the random initial
+  centers put two centers in some regions and none in others. No cluster is
+  dead, so the revival doesn't move them, and more epochs don't help: on a road
+  network, the inertia ends 10-15% above the one from k-means|| initial
+  centers.
+- `revival="greedy"`: on data that really has small clusters, the default
+  revival keeps removing them. The inertia then ends 1-4% above the best one on
+  YearPredictionMSD and Yolanda, and up to 2.5 times the best one on a credit
+  card fraud dataset, whatever the number of epochs.
+
+This example shows both options on 2-D blobs of very different sizes. On data
+with 1 or 2 features, the default revival is off (in `EMeans`, and in the
+reference implementation from the authors of the paper). With the default
+`init="random"`, the centers then stay in the regions where they start: several
+in the dense regions, none in the sparse ones.
 
 .. image:: /_static/emeans_init_revival.gif
    :alt: Animation of the four fits of this example, step by step: the centers

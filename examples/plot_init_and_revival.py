@@ -124,6 +124,15 @@ plt.show()
 # revival, nothing moves a center from a large blob to a far empty one, and the
 # inertia ends more than twice the reference.
 #
+# The reference implementation turns the default revival off on data with 1
+# or 2 features, because there, its rule makes the inertia grow. The rule
+# considers a cluster dead when its weight is below 0.1 times the mean weight.
+# On this data, the mini-batches have 128 samples: the smallest blobs get less
+# than 0.2 samples per mini-batch, against 2 on average, so their clusters are
+# found dead again and again, and their centers are moved to large blobs.
+# Forced on, with `init="k-means||"`, this revival takes the inertia from about
+# 1.1 to about 2.2 times the reference on average.
+#
 # `init="k-means||"` samples the initial centers with probabilities
 # proportional to their squared distance to the centers so far, so the small
 # blobs far from the others get one. A few blobs remain empty.

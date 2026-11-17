@@ -31,7 +31,7 @@ import sklearn_emeans._emeans as emeans_module
 from sklearn_emeans import EMeans
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "doc/_static/emeans_init_revival.gif"
-N_CLUSTERS, N_EPOCHS, RANDOM_STATE = 64, 5, 0
+N_CLUSTERS, N_EPOCHS, RANDOM_STATE = 64, 3, 9
 
 BACKGROUND, PANEL, INK, MUTED = "#fcfcfb", "#f3f3f0", "#1f1f1f", "#5f5f5f"
 # Colors that remain distinct with a color vision deficiency.
@@ -69,7 +69,7 @@ VARIANTS = [
 
 def make_data():
     """The data of examples/plot_init_and_revival.py."""
-    rng = np.random.RandomState(0)
+    rng = np.random.RandomState(3)
     grid = np.array([(i, j) for i in range(8) for j in range(8)], dtype=float)
     blob_centers = grid + rng.uniform(-0.25, 0.25, size=grid.shape)
     blob_sizes = np.round(np.exp(rng.uniform(np.log(20), np.log(1_000), 64)))
@@ -333,7 +333,7 @@ fig.text(
     0.03,
     'init="k-means||" costs about 2 to 3 more passes over the data, and '
     'revival="greedy" makes the fit longer.  '
-    f"EMeans(n_clusters=64, n_epochs=5, random_state={RANDOM_STATE}).",
+    f"EMeans(n_clusters=64, n_epochs={N_EPOCHS}, random_state={RANDOM_STATE}).",
     fontsize=9,
     color=MUTED,
     va="center",

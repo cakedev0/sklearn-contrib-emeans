@@ -29,7 +29,7 @@ The animation shows the fits of this example step by step. It is made by
 import numpy as np
 from sklearn.datasets import make_blobs
 
-rng = np.random.RandomState(0)
+rng = np.random.RandomState(3)
 grid = np.array([(i, j) for i in range(8) for j in range(8)], dtype=float)
 blob_centers = grid + rng.uniform(-0.25, 0.25, size=grid.shape)
 blob_sizes = np.round(np.exp(rng.uniform(np.log(20), np.log(1_000), 64))).astype(int)
@@ -54,8 +54,8 @@ reference_inertia = KMeans(n_clusters, init=blob_means, n_init=1).fit(X).inertia
 # Fit the four combinations
 # -------------------------
 #
-# We fit :class:`~sklearn_emeans.EMeans` with the default `n_epochs=5` and the
-# four combinations of `init` and `revival`:
+# We fit :class:`~sklearn_emeans.EMeans` with 3 epochs and the four
+# combinations of `init` and `revival`:
 #
 # - the default: `init="random"`, and no revival since the data has 2 features;
 # - `init="k-means||"`, which spreads out the initial centers;
@@ -65,6 +65,7 @@ reference_inertia = KMeans(n_clusters, init=blob_means, n_init=1).fit(X).inertia
 
 from sklearn_emeans import EMeans
 
+n_epochs = 3
 variants = {
     "Default": dict(),
     'init="k-means||"': dict(init="k-means||"),
@@ -72,7 +73,7 @@ variants = {
     "Both": dict(init="k-means||", revival="greedy"),
 }
 estimators = {
-    name: EMeans(n_clusters, random_state=0, **params).fit(X)
+    name: EMeans(n_clusters, n_epochs=n_epochs, random_state=9, **params).fit(X)
     for name, params in variants.items()
 }
 
@@ -121,15 +122,16 @@ plt.show()
 # With the default parameters, the random initial centers are samples, so the
 # large blobs get several of them and many small blobs get none. Without
 # revival, nothing moves a center from a large blob to a far empty one, and the
-# inertia ends about 3 times above the reference.
+# inertia ends more than twice the reference.
 #
 # `init="k-means||"` samples the initial centers with probabilities
 # proportional to their squared distance to the centers so far, so the small
 # blobs far from the others get one. A few blobs remain empty.
 #
 # `revival="greedy"` fixes the bad initialization during the fit: it moves the
-# centers of the blobs that have two of them to the empty blobs. It ends close
-# to the reference from either initialization.
+# centers of the blobs that have two of them to the empty blobs. From the
+# k-means|| initialization, there is less to fix: here, each blob ends with one
+# center.
 #
 # In the animation at the top, the inertia jumps up after some greedy revivals.
 # The cost of removing a cluster is estimated as if it were the only one
@@ -153,7 +155,9 @@ inertias, fit_times = {}, {}
 for name, params in variants.items():
     inertias[name], fit_times[name] = [], []
     for random_state in random_states:
-        estimator = EMeans(n_clusters, random_state=random_state, **params)
+        estimator = EMeans(
+            n_clusters, n_epochs=n_epochs, random_state=random_state, **params
+        )
         tic = time.perf_counter()
         estimator.fit(X)
         fit_times[name].append(time.perf_counter() - tic)
@@ -207,14 +211,16 @@ for name in variants:
     )
 
 # %%
-# On this data, `init="k-means||"` alone brings the inertia from about 2 to 4
-# times the reference to about 1.1 times, close to
-# :class:`~sklearn.cluster.KMeans` with a single k-means++ initialization.
-# `revival="greedy"` gets within a few percent of the reference, from either
-# initialization, below :class:`~sklearn.cluster.KMeans` with 10
-# initializations. Both make the fit longer: `init="k-means||"` costs about as
-# much as 2 to 3 epochs, and `revival="greedy"` runs its estimates on a sample
-# of the data during the first half of the fit.
+# On this data, `init="k-means||"` alone brings the inertia from 2 to 4 times
+# the reference to about 1.1 times, close to :class:`~sklearn.cluster.KMeans`
+# with a single k-means++ initialization. `revival="greedy"` alone usually gets
+# within 2% of the reference, but up to 6%: it only moves centers during the
+# first half of the fit, 1.5 epochs here, which is not always enough to fix a
+# random initialization. With both, all the fits end within 1.5% of the
+# reference, below :class:`~sklearn.cluster.KMeans` with 10 initializations.
+#
+# Both make the fit longer: `init="k-means||"` costs about as much as 2 to 3
+# epochs, and `revival="greedy"` runs its estimates on a sample of the data.
 #
 # `revival="greedy"` is experimental. See the documentation of `revival` in
 # :class:`~sklearn_emeans.EMeans` for when to prefer it on data with more

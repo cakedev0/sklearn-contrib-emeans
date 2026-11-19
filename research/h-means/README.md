@@ -73,7 +73,7 @@ Adaptive is `ivf` with `p=16, ratio=1.15, p_final=16`.
 | 3M | 3k | 3.48 | 2.72 | 3.37 | 2.73 | 3.00 | +0.22% | +0.19% |
 | 10M | 10k | 40.6 | 22.9 | 9.73 | 8.19 | 10.0 | +0.27% | +0.21% |
 | 30M | 30k | 414 | 193 | 27.1 | 26.2 | 32.6 | +0.33% | +0.24% |
-| 100M | 100k | pending | pending | 95.4 | 113 | 149 | | |
+| 100M | 100k | 4,775 | 2,114 | 95.4 | 113 | 149 | +0.40% | +0.29% |
 
 - Exponent of the time against `n`, from 1M to 30M: `emeans` 1.89,
   `superemeans` 1.72, adaptive 0.97, `ivf` p=4 0.92.
@@ -86,12 +86,13 @@ Adaptive is `ivf` with `p=16, ratio=1.15, p_final=16`.
 - The loss of adaptive stays between 0.19% and 0.24% over the 30x range. With
   a fixed `p=4` it creeps up.
 - `h2` loses 3.1% to 3.4% at all sizes.
-- At 100M, `emeans` with one epoch takes 1,611 s. Adaptive with 5 epochs takes
-  149 s for a 0.9% lower inertia, and adaptive with one epoch takes 51 s (32x)
-  for a 0.11% higher inertia.
-
-The 100M references with 5 epochs (`emeans`, `superemeans`) were still running
-when this was written.
+- At 100M, adaptive is 32x faster than `emeans` (149 s against 80 minutes)
+  and 14x faster than `superemeans`, for +0.29%. `ivf` p=4 is 42x faster for
+  +0.40%.
+- With one epoch, `emeans` takes 1,611 s and adaptive 51 s (32x), for a 0.24%
+  higher inertia (labels).
+- From 30M to 100M, the exponent is 2.03 for `emeans`, 1.99 for `superemeans`
+  and 1.26 for adaptive.
 
 ### Worst loss over the datasets (CPU, labels)
 
@@ -101,7 +102,7 @@ when this was written.
 | 100 | +0.29% | +0.11% | +0.52% | +4.0% |
 | 10 | +0.97% | +0.47% | +2.1% | +8.9% |
 
-1,000 per cluster: SIFT, GloVe and CLIP at `k=1000`, DEEP from 1M to 30M.
+1,000 per cluster: SIFT, GloVe and CLIP at `k=1000`, DEEP from 1M to 100M.
 100 per cluster: the 1M sets at `k=10k`, DEEP 10M at `k=100k`. 10 per cluster:
 the 1M sets at `k=100k`.
 
@@ -209,7 +210,6 @@ epochs. DEEP, 100 samples per cluster:
   made two-level.
 - `g = sqrt(k)` and the probing parameters were tuned by hand on these
   datasets.
-- The 100M runs have no flat reference with 5 epochs yet.
 
 ## Files
 

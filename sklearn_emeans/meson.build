@@ -34,6 +34,7 @@ py.install_sources(
     'tests/test_emeans.py',
     'tests/test_kmeans_plusplus.py',
     'tests/test_openmp_runtimes.py',
+    'tests/test_two_level.py',
   ],
   subdir: 'sklearn_emeans/tests',
 )

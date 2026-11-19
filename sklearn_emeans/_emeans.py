@@ -30,8 +30,10 @@ from sklearn_emeans._kernels import (
     _chunk_size,
     _emeans_steps,
     _emeans_steps_sparse,
+    _emeans_steps_two_level,
     _labels_inertia,
     _labels_inertia_sparse,
+    _labels_inertia_two_level,
     _omp_max_threads,
 )
 from sklearn_emeans._kmeans_parallel import _kmeans_parallel
@@ -75,6 +77,21 @@ _BATCH_LAWS = {
 # Step law: step_size = c * n_clusters**a_k * batch_size**a_b * n_samples**a_n
 # * n_epochs**a_t, stored as (c, a_k, a_b, a_n, a_t).
 _STEP_LAW = (0.8244, -0.4617, 0.9003, -0.4498, -0.1057)
+
+# Two-level assignment (`assignment="two-level"`). A sample probes at most
+# `_TWO_LEVEL_MAX_PROBES` cells: its nearest one, and the ones whose distance
+# to the sample is at most `_TWO_LEVEL_RATIO` times the distance of the nearest
+# one.
+_TWO_LEVEL_MAX_PROBES = 16
+_TWO_LEVEL_RATIO = 1.15
+
+# Number of epochs of the e-means of the initial centers that gives the
+# initial cells.
+_TWO_LEVEL_CELLS_N_EPOCHS = 10
+
+# Below this number of clusters, the two-level assignment is not faster than
+# the exact one, which is used instead.
+_TWO_LEVEL_MIN_CLUSTERS = 1024
 
 _CHUNK_SIZE = _chunk_size()
 
@@ -240,8 +257,28 @@ def _scheduled_step_size(initial_step_size, step, n_steps):
     )
 
 
+def _init_cells(centers, random_state):
+    """Initial cells of the two-level assignment.
+
+    The `round(sqrt(n_clusters))` coarse centers are an e-means of the
+    centers, with the exact assignment. Returns the coarse centers and the
+    cell of each center.
+    """
+    n_cells = max(1, round(math.sqrt(centers.shape[0])))
+    coarse = EMeans(
+        n_clusters=n_cells,
+        n_epochs=_TWO_LEVEL_CELLS_N_EPOCHS,
+        random_state=random_state,
+    ).fit(centers)
+    return coarse.cluster_centers_, coarse.labels_
+
+
 def _revive_dead_clusters(
-    centers, weight_ema, random_state, threshold=_DEAD_CLUSTER_THRESHOLD
+    centers,
+    weight_ema,
+    random_state,
+    threshold=_DEAD_CLUSTER_THRESHOLD,
+    cell_of_center=None,
 ):
     """Split heavy clusters to replace the dead ones, inplace.
 
@@ -249,7 +286,9 @@ def _revive_dead_clusters(
     EMA weight. Each dead cluster takes half of a donor cluster, drawn without
     replacement with a probability proportional to its EMA weight. The donor
     center is split into two centers moved by a tiny relative offset in
-    opposite directions, and its EMA weight is shared between them.
+    opposite directions, and its EMA weight is shared between them. With the
+    two-level assignment, the dead cluster also goes to the cell of its donor
+    in `cell_of_center`.
 
     Returns the number of revived clusters.
     """
@@ -262,6 +301,8 @@ def _revive_dead_clusters(
     )
     weight_ema[donor_indices] /= 2
     weight_ema[dead_indices] = weight_ema[donor_indices]
+    if cell_of_center is not None:
+        cell_of_center[dead_indices] = cell_of_center[donor_indices]
     return len(dead_indices)
 
 
@@ -479,12 +520,14 @@ class EMeans(
         init="random",
         n_epochs=5,
         revival=_DEAD_CLUSTER_THRESHOLD,
+        assignment="exact",
         random_state=None,
     ):
         self.n_clusters = n_clusters
         self.init = init
         self.n_epochs = n_epochs
         self.revival = revival
+        self.assignment = assignment
         self.random_state = random_state
 
     def __sklearn_tags__(self):
@@ -522,6 +565,13 @@ class EMeans(
             raise ValueError(
                 "revival must be a float in [0, 0.5] or 'greedy', got "
                 f"{self.revival!r}."
+            )
+        if not isinstance(self.assignment, str) or self.assignment not in (
+            "exact",
+            "two-level",
+        ):
+            raise ValueError(
+                f"assignment must be 'exact' or 'two-level', got {self.assignment!r}."
             )
         if isinstance(self.init, str):
             if self.init not in ("random", "k-means++", "k-means||"):
@@ -639,6 +689,11 @@ class EMeans(
         self._check_params()
         xp = _array_api.get_namespace(X)
         if xp is not None:
+            if self.assignment == "two-level":
+                raise ValueError(
+                    "assignment='two-level' is not supported for array API "
+                    "inputs with array_api_dispatch=True."
+                )
             return self._fit_array_api(xp, X)
         X = validate_data(
             self,
@@ -648,6 +703,8 @@ class EMeans(
             order="C",
             accept_large_sparse=False,
         )
+        if self.assignment == "two-level" and sp.issparse(X):
+            raise ValueError("assignment='two-level' is not supported for sparse X.")
         n_samples, n_features = X.shape
         n_clusters = self.n_clusters
         if n_samples < n_clusters:
@@ -680,9 +737,32 @@ class EMeans(
         epoch_sums = np.zeros((n_clusters, n_features), dtype=np.float64)
         epoch_counts = np.zeros(n_clusters, dtype=np.float64)
 
-        emeans_steps = _emeans_steps_sparse if sp.issparse(X) else _emeans_steps
+        two_level = (
+            self.assignment == "two-level" and n_clusters >= _TWO_LEVEL_MIN_CLUSTERS
+        )
+        if two_level:
+            # The cells are updated inplace by the steps and the revivals.
+            cells, cell_of_center = _init_cells(centers, random_state)
+
+            def emeans_steps(*args):
+                _emeans_steps_two_level(
+                    *args,
+                    cells,
+                    cell_of_center,
+                    _TWO_LEVEL_MAX_PROBES,
+                    _TWO_LEVEL_RATIO,
+                )
+
+        else:
+            cell_of_center = None
+            emeans_steps = _emeans_steps_sparse if sp.issparse(X) else _emeans_steps
         revive = partial(
-            _revive_dead_clusters, centers, weight_ema, random_state, self.revival
+            _revive_dead_clusters,
+            centers,
+            weight_ema,
+            random_state,
+            self.revival,
+            cell_of_center,
         )
         greedy = self._greedy_revival(
             X,
@@ -730,7 +810,7 @@ class EMeans(
                         n_threads,
                     )
                     if _is_greedy_step(greedy, step + stop):
-                        greedy(centers, weight_ema)
+                        greedy(centers, weight_ema, cell_of_center)
                 step += n_epoch_steps
 
         # The final centers are the means of the last epoch's assignments.
@@ -740,9 +820,24 @@ class EMeans(
 
         self.cluster_centers_ = centers
         self._n_features_out = n_clusters
-        self.labels_, self.inertia_ = _labels_inertia_threadpool_limit(
-            X, centers, max_n_threads
-        )
+        if two_level:
+            self.labels_ = np.empty(n_samples, dtype=np.int32)
+            with _threadpool_controller().limit(limits=1, user_api="blas"):
+                self.inertia_ = _labels_inertia_two_level(
+                    X,
+                    centers,
+                    weight_ema,
+                    cells,
+                    cell_of_center,
+                    _TWO_LEVEL_MAX_PROBES,
+                    _TWO_LEVEL_RATIO,
+                    self.labels_,
+                    max_n_threads,
+                )
+        else:
+            self.labels_, self.inertia_ = _labels_inertia_threadpool_limit(
+                X, centers, max_n_threads
+            )
         self.batch_size_ = batch_size
         return self
 

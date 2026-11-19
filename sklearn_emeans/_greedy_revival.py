@@ -96,8 +96,12 @@ class GreedyRevival:
         """Whether clusters are revived after `step` steps of the fit."""
         return step % self.period == 0 and step <= self.last_step
 
-    def __call__(self, centers, weight_ema):
-        """Revive clusters, inplace. Returns the number of revived clusters."""
+    def __call__(self, centers, weight_ema, cell_of_center=None):
+        """Revive clusters, inplace. Returns the number of revived clusters.
+
+        With the two-level assignment, a removed cluster also goes to the cell
+        of its donor in `cell_of_center`.
+        """
         n_rows = self.X.shape[0]
         n_clusters = centers.shape[0]
         if n_clusters < 2:
@@ -159,6 +163,8 @@ class GreedyRevival:
             centers[i], centers[j] = split_centers[trial_of[j]]
         weight_ema[donors] /= 2
         weight_ema[removed] = weight_ema[donors]
+        if cell_of_center is not None:
+            cell_of_center[removed] = cell_of_center[donors]
         return len(removed)
 
 

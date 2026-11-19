@@ -1,0 +1,2 @@
+[{"k": 1000, "method": "ivf", "p": 4, "p_final": 8},{"k": 1000, "method": "ivf", "p": 16, "ratio": 1.15, "p_final": 16},
+ {"k": 10000, "method": "ivf", "p": 4, "p_final": 8},{"k": 10000, "method": "ivf", "p": 16, "ratio": 1.15, "p_final": 16},{"k": 1000, "method": "flat"}]

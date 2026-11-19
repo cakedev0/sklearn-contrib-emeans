@@ -1,0 +1,4 @@
+[{"method":"ivf","k":10000,"p":1},{"method":"ivf","k":10000,"p":4},{"method":"ivf","k":10000,"p":8},
+ {"method":"ivf","k":10000,"p":16,"ratio":1.15,"p_final":16},
+ {"method":"ivf","k":10000,"p":8,"ratio":1.2,"p_final":8},
+ {"method":"flat","k":10000,"T":5}]

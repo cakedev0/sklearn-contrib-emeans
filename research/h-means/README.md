@@ -164,6 +164,105 @@ epochs. DEEP, 100 samples per cluster:
   work in a 4 s fit on DEEP 10M), so its GPU timings (`l4/v1_main.jsonl`,
   `l4/v3_adaptive.jsonl`) are only good for the inertia.
 
+### GPU: `EMeans(assignment="two-level")`
+
+The package runs the two-level assignment on CUDA devices with Triton kernels
+(`sklearn_emeans/_two_level_triton.py`), with the cells, the refresh and the
+probing rule of the CPU path. `gpu_design.md` has the design and the
+measurements on the assignment alone.
+
+Fit time in seconds on the L4, best of 2 runs, 5 epochs, random init. The
+loss is on labels against `emeans`, the exact `EMeans` on the same GPU (one
+run at 10M). `two-level` probes 6 to 7 cells per row, `omeans` has `sqrt(k)`
+cells.
+
+| data | k | `emeans` | `faiss-e` | `omeans` nprobe=4 | `omeans` nprobe=8 | two-level |
+|---|---|---|---|---|---|---|
+| DEEP 1M | 10k | 2.82 | 0.33 | 0.059 (+0.78%) | 0.086 (+0.22%) | 0.31 (+0.13%) |
+| DEEP 3M | 30k | 25.9 | 2.75 | 0.25 (+0.85%) | 0.39 (+0.30%) | 0.99 (+0.19%) |
+| DEEP 10M | 100k | 336 | 28.9 | 1.54 (+0.92%) | 2.40 (+0.39%) | 4.29 (+0.18%) |
+| DEEP 10M | 10k | 29.5 | 3.45 | 0.71 (+0.75%) | 1.25 (+0.25%) | 3.03 (+0.09%) |
+| DEEP 10M | 1M | | | | fails | 16.0 |
+| SIFT 1M | 10k | 3.28 | 0.37 | 0.076 (+0.68%) | 0.11 (+0.15%) | 0.36 (+0.17%) |
+| GloVe 1.18M | 10k | 5.41 | 0.77 | 0.20 (+0.34%) | 0.35 (+0.13%) | 1.00 (+0.05%) |
+| CLIP 1M | 10k | 9.07 | 1.22 | 0.29 (+0.66%) | 0.38 (+0.17%) | 0.95 (+0.07%) |
+
+- Against the exact `EMeans` on the same GPU: 9x to 10x faster at `k=10k`, 26x
+  at 3M and `k=30k`, 78x at 10M and `k=100k`, for +0.05% to +0.19% on labels.
+- Exponents of the time against `n` at 100 samples per cluster (first three
+  rows): `emeans` 2.08, `faiss-e` 1.94, `omeans` 1.42 (nprobe=4) and 1.45
+  (nprobe=8), two-level 1.15.
+- It is not within 1.5x of o-means. At the closest loss (nprobe=8, which still
+  loses more), o-means is 3.6x faster at 1M, 2.4x at 10M and `k=10k`, 1.8x at
+  10M and `k=100k`. Against nprobe=4 it is 2.8x to 5x.
+- At `k=1M` (10 samples per cluster) it runs in 16 s. o-means fails there on
+  the L4 with its shared memory error, and the exact fits were not run (about
+  an hour for `emeans` from the times above).
+- GloVe is the slowest for its size: the ratio rule prunes little there, as on
+  CPU (journal item 7).
+
+Where the 3.3 s of DEEP 10M at `k=10k` go (`prof_gpu.py`, which synchronizes
+after each part, so the total is above the 3.03 s of the table). The parts
+are for the 5 epochs and the labelling pass, 60M assignments:
+
+| part | k=10k | k=100k |
+|---|---|---|
+| fine kernel | 0.74 s | 1.03 s |
+| coarse kernel | 0.22 s | 0.72 s |
+| gather of the batches and their float16 copies | 0.35 s | 0.37 s |
+| other kernels (group the pairs by cell, reduce) | 0.21 s | 0.22 s |
+| 5 permutations of the samples, on the host | 0.74 s | 0.74 s |
+| initial centers (`RandomState.choice`, on the host) | 0.16 s | 0.19 s |
+| initial cells | 0.02 s | 0.32 s (0.05 s since) |
+| refresh of the cells | 0.10 s | 0.20 s |
+| sums of the batches, EMA update, revival | 0.14 s | 0.31 s |
+| total | 3.28 s | 4.66 s |
+
+- A fit of o-means at `k=10k` takes 0.71 s in all, less than the random
+  numbers of `EMeans` on the host (0.9 s), which are part of its contract: same
+  numbers from `random_state` on all the backends. The permutations took 1.9 s
+  with `RandomState.permutation` (0.38 s for 10M items on this VM).
+  `_emeans._permutation` draws the same permutation in 0.15 s, and it also
+  serves the CPU path.
+- At `k=10k` the fine kernel is bound by reading the rows, once per probed
+  cell, more than by the products. This is why float16 inputs help less in a
+  fit than on the assignment alone.
+- The coarse kernel at `k=100k` costs as much per row as 2/3 of the fine
+  kernel for 7 times fewer products: the 16 rounds of the adaptive selection
+  dominate it.
+
+Precision of the kernels (`_two_level_triton.PRECISION`), fit time and loss on
+labels:
+
+| data | k | float16 (default) | TF32 | float32 products |
+|---|---|---|---|---|
+| DEEP 1M | 10k | 0.31 s (+0.13%) | 0.30 s (+0.13%) | 0.45 s (+0.12%) |
+| SIFT 1M | 10k | 0.36 s (+0.17%) | 0.34 s (+0.19%) | 0.54 s (+0.19%) |
+| GloVe 1.18M | 10k | 1.00 s (+0.05%) | 1.08 s (+0.07%) | 2.19 s (+0.04%) |
+| CLIP 1M | 10k | 0.95 s (+0.07%) | 0.92 s (+0.07%) | 1.78 s (+0.06%) |
+| DEEP 10M | 10k | 3.03 s (+0.09%) | 2.99 s (+0.09%) | |
+| DEEP 10M | 100k | 4.29 s (+0.18%) | 4.67 s (+0.18%) | |
+| DEEP 10M | 1M | 16.0 s | 17.3 s | |
+
+Rounding the inputs of the products to 11 bits (float16) or 10 bits (TF32)
+has no visible effect on the inertia: the differences are within the 0.05% of
+seed-to-seed noise. float16 only pays from `k=100k` (8%), and TF32 needs no
+copy and no scale.
+
+To reproduce, on a machine with a CUDA device, PyTorch, Triton and the
+owlgebra-ai/faiss fork on `PYTHONPATH`:
+
+```
+export SCIPY_ARRAY_API=1 PY=python
+benchlock --tag "h-means gpu main" all -- scripts/l4_gpu_main.sh
+python show_gpu.py results/l4/gpu_main.jsonl
+python prof_gpu.py deep10M 10000
+```
+
+The two-level rows at `k=30k` and `k=100k` are from a second run of the same
+commands, after the e-means of more than 16k initial centers moved from the
+host to the device (4.53 s to 4.29 s at `k=100k`).
+
 ## Journal
 
 1. **Frozen two-level (`h2`).** +0.7% to +2.5% on centers and +1.6% to +4.0%
@@ -203,6 +302,20 @@ epochs. DEEP, 100 samples per cluster:
      libgomp recreates its threads (v3 regression on small inputs).
    - The prototype reaches about a third of the arithmetic rate of the flat
      GEMM, so a tuned kernel has room left.
+
+10. **GPU kernels** (`gpu_design.md`), what mattered:
+    - Only kernels on the tensor cores beat the exact assignment by more than
+      the ratio of the dot products: padded batched products and a CUDA C
+      kernel with scalar FMAs are 5x to 30x slower than Triton's `tl.dot`.
+    - The shared memory error of o-means on the L4 comes from the software
+      pipelining of Triton, which keeps copies of all the cells in shared
+      memory. `num_stages=1` in the coarse kernel removes it at no cost.
+    - With the assignment 10x to 80x faster, the host side of a fit shows:
+      the permutations of `RandomState` were 45% of the fit at `k=10k`.
+    - float32 and float64 fits diverge on CPU too once clusters are revived
+      (the two halves of a split center are 1e-4 apart, so the rounding picks
+      the half of many samples). The tests that compare CPU and GPU fits run
+      without revival.
 
 ## CPU implementation in `EMeans`
 
@@ -613,6 +726,10 @@ assignment.
   the wheels and 64 threads.
 - `results/all_runs.csv`, `results/scaling.csv`: written by `summarize.py`.
 - `show.py`, `show_om.py`: print tables from JSON lines.
+- `gpu_design.md`, `gpu_design/`: design of the GPU path and its benchmark of
+  the assignment alone (prototype kernels in Triton and CUDA C).
+- `bench_gpu.py`, `show_gpu.py`, `prof_gpu.py`: `EMeans` with
+  `assignment="two-level"` on a GPU against the exact fit, faiss and o-means.
 - `prof.py`, `prof_cpu.py`: profiling helpers.
 - `bench_cpu.py`: times `EMeans` with the exact and the two-level
   assignment. `show_cpu.py` prints its results next to the ones of `exp.py`.

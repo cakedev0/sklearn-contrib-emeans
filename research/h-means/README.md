@@ -150,8 +150,13 @@ epochs. DEEP, 100 samples per cluster:
 - On the 1M sets at `k=10k`, 100 cells and nprobe=4 give 3.8x to 4.8x for
   +0.34% to +0.70%. At `k=100k`, nprobe=8 gives 6x to 8.8x for +0.42% to
   +0.93%.
-- o-means has neither the adaptive rule nor extra probes for the final
-  labelling, hence the higher loss on labels than the CPU prototype.
+- The loss in the table comes from the settings chosen here (`sqrt(k)` cells,
+  4 or 8 probes), not from o-means as shipped: with its defaults the loss is
+  at most +0.05% in all the runs. The defaults just buy less speed.
+- With these settings the loss grows with `n` (+0.79% to +0.94% with
+  nprobe=4), as with a fixed `p` in the CPU prototype. o-means has neither the
+  adaptive rule nor extra probes for the final labelling. They would probably
+  help it as they help the prototype, but this was not tested in o-means.
 - The PyTorch prototype on GPU is bound by Python overhead (about 1.3 s of GPU
   work in a 4 s fit on DEEP 10M), so its GPU timings (`l4/v1_main.jsonl`,
   `l4/v3_adaptive.jsonl`) are only good for the inertia.

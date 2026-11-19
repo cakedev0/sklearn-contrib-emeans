@@ -120,6 +120,76 @@ Initialization
 The time of a better initialization can also be spent on more epochs: compare
 both on your data.
 
+Many clusters
+-------------
+
+With the default `assignment="exact"`, each sample is compared to all the
+centers: an epoch costs `O(n_samples * n_clusters)`. With a given number of
+samples per cluster, the fit time is then quadratic in the number of samples.
+
+`assignment="two-level"` groups the centers in `round(sqrt(n_clusters))`
+cells. A sample is compared to the centers of the cells, then only to the
+centers of its nearest cells, and an epoch costs about
+`O(n_samples * sqrt(n_clusters))`::
+
+    EMeans(n_clusters=10_000, assignment="two-level").fit(X)
+
+The rest of the algorithm is unchanged. The cells follow the centers during the
+fit: before each mini-batch, each cell center moves to the mean of its
+centers, and each center goes to the cell of its nearest cell center. A sample
+probes its nearest cell, and the cells that are at most 1.15 times as far from
+it, up to 16 cells.
+
+On one socket of a Xeon 6787P server with 64 threads, with 5 epochs:
+
+.. list-table::
+   :header-rows: 1
+
+   * - data
+     - `n_clusters`
+     - `"exact"`
+     - `"two-level"`
+     - inertia of `labels_`
+   * - SIFT (1M samples, 128 features)
+     - 10,000
+     - 4.9 s
+     - 1.0 s
+     - +0.18%
+   * - Wolt CLIP (1M samples, 512 features)
+     - 10,000
+     - 10.9 s
+     - 2.5 s
+     - +0.16%
+   * - DEEP (10M samples, 96 features)
+     - 10,000
+     - 40 s
+     - 5.8 s
+     - +0.11%
+   * - DEEP (10M samples, 96 features)
+     - 100,000
+     - 485 s
+     - 11.6 s
+     - +0.16%
+
+What to know before using it:
+
+- The inertia is typically 0.1% to 0.2% higher than with `"exact"`, on
+  embedding datasets with 100 to 1,000 samples per cluster.
+- `labels_` and `inertia_` come from a two-level assignment too: a fraction of
+  a percent of the samples don't get their closest center, and `inertia_` is
+  the inertia of these labels. `predict` and `score` stay exact, in
+  `O(n_samples * n_clusters)`.
+- Below 1024 clusters it is not faster, and `"two-level"` is the same as
+  `"exact"`.
+- It only supports dense NumPy inputs: sparse and array API inputs raise an
+  error.
+- `init="k-means||"`, `init="k-means++"` and `revival="greedy"` still compare
+  samples to all the centers. With many clusters they take most of the fit
+  time: prefer `init="random"`.
+- The fit keeps a copy of each mini-batch, `batch_size_` samples.
+- It is experimental: its algorithm may change from one version to the next,
+  and its results with it.
+
 Input data
 ----------
 

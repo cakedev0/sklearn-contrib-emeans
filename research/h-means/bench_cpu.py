@@ -13,6 +13,7 @@ import os
 import time
 
 import numpy as np
+import sklearn
 from sklearn_emeans._kernels import _labels_inertia
 from threadpoolctl import threadpool_limits
 
@@ -72,6 +73,11 @@ def main():
     parser.add_argument("--ratio", type=float)
     parser.add_argument("--min-clusters", type=int)
     parser.add_argument("--labels-ratio", type=float)
+    parser.add_argument(
+        "--assume-finite",
+        action="store_true",
+        help="skip the check of the input of scikit-learn, as the prototype",
+    )
     parser.add_argument("--tag", default="")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -106,7 +112,8 @@ def main():
                     random_state=args.seed,
                 )
                 tic = time.perf_counter()
-                emeans.fit(X)
+                with sklearn.config_context(assume_finite=args.assume_finite):
+                    emeans.fit(X)
                 t_fit = time.perf_counter() - tic
                 result = {
                     "data": args.data,
@@ -123,6 +130,7 @@ def main():
                     "labels_ratio": _emeans._TWO_LEVEL_LABELS_RATIO,
                     "threads": n_threads,
                     "slot": os.environ.get("BENCHLOCK_SLOT"),
+                    "assume_finite": args.assume_finite,
                     "t_fit": t_fit,
                     "batch_size": emeans.batch_size_,
                 }

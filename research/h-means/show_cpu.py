@@ -4,10 +4,11 @@
 
 The loss is the inertia of the labels against the one of `EMeans exact` on the
 same data, number of clusters and number of samples. With several runs of a
-configuration, the time is the fastest one.
+configuration, the time is the median.
 """
 
 import json
+import statistics
 import sys
 from collections import defaultdict
 
@@ -31,7 +32,8 @@ def main():
     print("|---|---|---|---|---|---|---|---|")
     for (data, n, k, method), rs in runs.items():
         reference = runs.get((data, n, k, "EMeans exact"))
-        best = min(rs, key=lambda r: r["t_fit"])
+        best = rs[0]
+        t_fit = statistics.median(r["t_fit"] for r in rs)
         if reference is None:
             centers, labels = "", ""
         else:
@@ -39,7 +41,7 @@ def main():
             centers = f"{100 * (best['inertia_exact'] / ref - 1):+.2f}%"
             labels = f"{100 * (best['inertia_labels'] / ref - 1):+.2f}%"
         print(
-            f"| {data} | {n:,} | {k:,} | {method} | {best['t_fit']:.3g} | "
+            f"| {data} | {n:,} | {k:,} | {method} | {t_fit:.3g} | "
             f"{centers} | {labels} | {best['recall']:.4f} |"
         )
 

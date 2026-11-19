@@ -1,7 +1,10 @@
 # h-means: two-level e-means
 
-Research prototype and experiment journal. Nothing here is part of the
-`sklearn_emeans` package.
+Research prototype and experiment journal. The prototype (`hkm.py`,
+`hkm_kernels.pyx`) is not part of the `sklearn_emeans` package. The coupled
+two-level method with adaptive probing is now in the package for dense NumPy
+input, as `EMeans(assignment="two-level")`: see
+[CPU implementation in `EMeans`](#cpu-implementation-in-emeans).
 
 At a fixed cluster size `s`, e-means costs `O(n k d) = O(n^2 d / s)`. The
 question is whether a two-level scheme can bring this down to about
@@ -201,6 +204,168 @@ epochs. DEEP, 100 samples per cluster:
    - The prototype reaches about a third of the arithmetic rate of the flat
      GEMM, so a tuned kernel has room left.
 
+## CPU implementation in `EMeans`
+
+`EMeans(assignment="two-level")` is the `ivf` method with adaptive probing
+(`p=16, ratio=1.15`), in Cython, for dense NumPy input. Differences with the
+prototype:
+
+- The whole step loop is in `_kernels.pyx`, in one parallel region, as for the
+  exact assignment. The result does not depend on the number of threads.
+- The labelling pass uses a ratio of 1.3 in place of 1.15 (see below).
+- Below 1024 clusters, `"two-level"` is the exact assignment.
+- Ties go to the lowest center index, as with the exact assignment. When all
+  the cells are probed, the result is the one of the exact assignment up to
+  rounding.
+
+### Results
+
+One socket of the Xeon 6787P server (`benchlock` slot `s1`), 64 threads, 5
+epochs, random init, one seed. `EMeans` exact, the prototype (`v4`, adaptive)
+and `EMeans` two-level ran in the same `benchlock` call. Times are fit times in
+seconds, the median of 3 fits for two-level. The loss is the inertia against
+`EMeans` exact, on 1M random samples (200k at `k=100k`): "centers" is the exact
+inertia of the centers, "labels" the one of `labels_`.
+
+| data | k | exact | prototype | two-level | speed-up | loss (centers) | loss (labels) |
+|---|---|---|---|---|---|---|---|
+| SIFT 1M | 10k | 4.85 | 1.48 | 0.98 | 5.0x | +0.17% | +0.18% |
+| GloVe 1.18M | 10k | 6.89 | 2.56 | 2.36 | 2.9x | +0.03% | +0.06% |
+| CLIP 1M | 10k | 10.9 | 1.92 | 2.53 | 4.3x | +0.15% | +0.16% |
+| DEEP 10M | 10k | 40.4 | 10.1 | 5.82 | 6.9x | +0.10% | +0.11% |
+| DEEP 10M | 100k | 485 | 16.6 | 11.6 | 42x | +0.14% | +0.16% |
+
+- The loss on labels is at most +0.18%. The loss of the prototype in these
+  runs is +0.29%, +0.04%, +0.10%, +0.30% and +0.44% (same seed, but its
+  evaluation sample is another one, so compare to within about 0.05%).
+- Two-level is faster than the prototype on four cases out of five, by 1.1x
+  to 1.7x. On CLIP it is slower (2.53 s against 1.92 s): see "What does not
+  meet the target".
+
+Scaling at 1,000 samples per cluster on DEEP (the first `n` samples of DEEP
+100M):
+
+| n | k | exact | prototype | two-level | loss (labels) |
+|---|---|---|---|---|---|
+| 1M | 1k | 0.67 | 1.21 | 0.60 | +0.07% |
+| 3M | 3k | 3.43 | 3.17 | 1.69 | +0.10% |
+| 10M | 10k | 40.5 | 10.1 | 5.78 | +0.11% |
+| 30M | 30k | 402 | 34.0 | 22.1 | +0.10% |
+
+- Exponent of the time against `n`, from 1M to 30M: 1.88 for exact, 0.98 for
+  the prototype, 1.06 for two-level. The local exponent of two-level rises
+  with `n`: 0.95, 1.02, 1.22.
+- At 1M samples and `k=1000`, `"two-level"` is the exact assignment in the
+  package (below 1024 clusters). The two-level time in the table has this
+  fallback turned off (`--min-clusters 1`).
+
+Where two-level starts to win (same machine, `exact` / `two-level` in seconds,
+median of 3 fits, 2 on DEEP 10M, with the fallback turned off, measured
+before the partial sums of the squared norm):
+
+| k | SIFT 1M | DEEP 1M | CLIP 1M | DEEP 10M |
+|---|---|---|---|---|
+| 256 | 0.43 / 0.55 | 0.41 / 0.57 | 1.14 / 1.40 | 3.15 / 4.06 |
+| 512 | 0.54 / 0.60 | 0.51 / 0.61 | 1.33 / 1.63 | 3.95 / 4.22 |
+| 1024 | 0.76 / 0.59 | 0.70 / 0.63 | 1.88 / 1.75 | 5.52 / 4.22 |
+| 2048 | 1.11 / 0.66 | 0.97 / 0.67 | 2.74 / 1.92 | 8.31 / 4.52 |
+| 4096 | 1.85 / 0.82 | 1.66 / 0.76 | 4.75 / 2.18 | - |
+
+The time of two-level hardly depends on `k` in this range (about 0.55 s per
+million samples with 96 or 128 features), so it loses up to 512 clusters and
+wins from 1024. Hence the fallback to the exact assignment below 1024
+clusters.
+
+Commands (on the server, in a directory with a venv where the branch is
+installed):
+
+```
+benchlock --tag "h-means cpu main" s1 -- ./scripts/xeon_cpu_main.sh
+benchlock --tag "h-means cpu scaling" s1 -- ./scripts/xeon_cpu_scaling.sh
+python show_cpu.py results/xeon/cpu_main.jsonl results/xeon/cpu_main_proto.jsonl
+OMP_NUM_THREADS=64 python bench_cpu.py --data sift1m --k 256 512 1024 2048 4096 \
+    --min-clusters 1 --repeat 3 --out res/small_k.jsonl
+```
+
+### What mattered for the speed
+
+Per-phase times are from a build with timers around each phase, not
+committed.
+
+- **Size of the GEMMs.** With 256 rows per GEMM as in the exact assignment
+  and in the prototype, a product costs 2 to 3 times more than in the big GEMM
+  of the exact assignment (4.8 ns against 2.1 ns for 128 features), for the
+  coarse and for the fine search. With 1024 rows: DEEP 10M at `k=10k` goes
+  from 9.0 s to 5.6 s. 512 to 2048 rows are within 10% of each other, on 96
+  to 512 features. This is what "a third of the arithmetic rate" was in the
+  prototype.
+- **Sort of the batch by label**, for the update of the centers. Sequential,
+  it took 0.36 s out of 6.4 s on DEEP 10M. It is now a counting sort by the
+  cell of the label, in parallel over blocks of rows, then by center inside
+  each cell, in parallel over cells: 0.02 s.
+- **Probe selection.** Keeping the probed cells sorted while going through the
+  cells, in place of 16 passes over the candidates. It matters on GloVe, where
+  most samples have more than 16 candidates.
+- The squared norm of each row, for the ratio rule, took as long as the rest
+  of the selection: the compiler can't vectorize a sum of floats in order.
+  It now has 8 partial sums.
+
+On DEEP 10M at `k=10k`, where the fit takes 5.8 s: the steps take 3.1 s
+(of which 0.45 s to copy the batches), the check of the input by scikit-learn
+1.3 s, the labelling pass 1.0 s, and the permutations, the inits and the rest
+of the Python code about 1.2 s. The fine search is about 60% of the steps and
+of the labelling pass, the coarse search 15%.
+
+### What does not meet the target
+
+- **CLIP 1M is slower than the prototype**: 2.53 s against 1.92 s. Most of
+  the difference is the check of the input by scikit-learn (0.55 s for
+  1M x 512 in float32, sequential), which the prototype does not do. With
+  `sklearn.config_context(assume_finite=True)`, two-level takes 2.0 s to
+  2.2 s on CLIP (and 5.2 s on DEEP 10M at `k=10k`, 0.9 s on SIFT). The rest
+  is the wider ratio of the labelling pass.
+- Prefetching the rows in the copies of the batch, and running the short
+  GEMMs last so that the threads wait less at the end of the fine search,
+  changed nothing measurable (interleaved A/B on the 5 cases), so they are
+  not in.
+- **The labelling ratio is not the one of the prototype.** With 1.15 for the
+  steps and for the labels, the loss on labels was +0.30% on SIFT 1M
+  (40335.3 against 40214.4), right at the limit, and +0.21% to +0.23% on CLIP
+  and DEEP. With 1.3 for the labelling pass only, it is +0.18% at most, for
+  0% to 10% more time. A ratio of 1.2 everywhere gives +0.05% to +0.14% for
+  8% to 22% more time.
+
+### Semantics, for another backend
+
+1. `g = max(1, round(sqrt(n_clusters)))` cells. The initial cells are
+   `EMeans(n_clusters=g, n_epochs=10, random_state=rs).fit(centers)` on the
+   initial centers, with the exact assignment and the `RandomState` of the
+   fit. It is the first draw after the init of the centers, before the sample
+   of the greedy revival and the permutations.
+2. Refresh, before each step and before the labelling pass: each cell center
+   becomes the mean of the centers of its cell, with the weights
+   `max(weight_ema, 1e-12)` (a cell without center keeps its cell center),
+   then each center goes to the cell of its nearest cell center, among all
+   the cells.
+3. A sample probes its nearest cell among the cells that have centers, and
+   the cells with `d <= ratio**2 * d_nearest`, `d` being the squared
+   distance, limited to the 16 nearest cells. `ratio` is 1.15 in the steps
+   and 1.3 in the labelling pass.
+4. The sample goes to the nearest center of the cells it probes. Ties go to
+   the lowest index, for the cells and for the centers.
+5. After a revival, a revived center takes the cell of its donor
+   (`cell_of_center[dead] = cell_of_center[donor]`), for the mean of the
+   cells of the next refresh. Same for the greedy revival.
+6. The labelling pass refreshes the cells from the final centers and the
+   last EMA weights. `inertia_` is the sum of the squared distances of the
+   samples to the center of their label.
+7. Below 1024 clusters, the assignment is exact and no random number is
+   drawn for the cells.
+
+The constants are `_TWO_LEVEL_*` in `sklearn_emeans/_emeans.py`, and
+`tests/test_two_level.py` has a NumPy reference of the refresh and of the
+assignment.
+
 ## Limits
 
 - One seed per configuration, one machine per device type.
@@ -224,10 +389,18 @@ epochs. DEEP, 100 samples per cluster:
   `benchlock`.
 - `results/xeon/`, `results/l4/`: raw JSON lines, one per run. `v1` to `v4`
   are versions of the CPU kernels: the inertia is valid in all of them, the
-  CPU timings only in `v4`.
+  CPU timings only in `v4`. `cpu_*.jsonl` are the runs of `EMeans`
+  (`bench_cpu.py`) and of the prototype in the same `benchlock` call:
+  `cpu_main` and `cpu_scaling` are the tables above, `cpu_small_k` the
+  search of the fallback, `cpu_ratio` the ratios (1.15 everywhere, 1.2
+  everywhere, 1.3 for the labels, with an earlier version of the kernels) and
+  `cpu_ab` the A/B of the prefetch and of the task order, with and without
+  `assume_finite`.
 - `results/all_runs.csv`, `results/scaling.csv`: written by `summarize.py`.
 - `show.py`, `show_om.py`: print tables from JSON lines.
 - `prof.py`, `prof_cpu.py`: profiling helpers.
+- `bench_cpu.py`: times `EMeans` with the exact and the two-level
+  assignment. `show_cpu.py` prints its results next to the ones of `exp.py`.
 
 To run a grid on CPU:
 

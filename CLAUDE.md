@@ -67,6 +67,19 @@ the same result up to rounding, and the tests compare them with each other and
 with the pure NumPy `_reference_step` of `tests/test_emeans.py`. A change to
 the algorithm goes in both.
 
+`assignment="two-level"` (dense NumPy input only, 1024 clusters or more) is
+a third set of kernels, at the end of `_kernels.pyx`: `_emeans_steps_two_level`
+and `_labels_inertia_two_level`. They take the same arguments as the exact
+ones, plus the cells (`cells`, `cell_of_center`), which `fit` creates with
+`_init_cells` and which the kernels and the revivals update inplace, and the
+probing constants (`_TWO_LEVEL_*` in `_emeans.py`). A step first makes the
+cells follow the centers (`_refresh_cells`), then assigns the batch
+(`_search`). The pieces of work of each phase must not depend on the number of
+threads, since the rounding of a GEMM depends on its shape. The pure NumPy
+reference is in `tests/test_two_level.py`. `research/h-means/README.md` has
+the measurements behind the constants and the semantics to mirror in another
+backend.
+
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and
 `labels_` / `inertia_` come from an extra assignment pass.

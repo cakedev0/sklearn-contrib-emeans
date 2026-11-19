@@ -2141,6 +2141,33 @@ cdef void _two_level_init(
     tl.cell_of_center = cell_of_center
 
 
+cdef inline floating _squared_norm_unrolled(
+    const floating *x,
+    intp_t n_features,
+) noexcept nogil:
+    """Squared norm with 8 partial sums.
+
+    `_squared_norm` adds the terms one after the other, which the compiler
+    can't vectorize: it takes as long as comparing the row to tens of cells.
+    """
+    cdef:
+        floating[8] partial
+        floating result = 0.0
+        intp_t k, u
+        intp_t n_unrolled = n_features - n_features % 8
+
+    for u in range(8):
+        partial[u] = 0.0
+    for k in range(0, n_unrolled, 8):
+        for u in range(8):
+            partial[u] += x[k + u] * x[k + u]
+    for k in range(n_unrolled, n_features):
+        result += x[k] * x[k]
+    for u in range(8):
+        result += partial[u]
+    return result
+
+
 cdef inline intp_t _two_level_distances_size(TwoLevel *tl) noexcept nogil:
     """Size of the buffer of distances of a thread."""
     return max(
@@ -2855,7 +2882,9 @@ cdef void _search(
             # ||x - g||² <= ratio² ||x - g_nearest||², without the ||x||² of
             # the left-hand side. The threshold is finite: the distance of an
             # empty cell is infinite.
-            squared_norm = _squared_norm(X_rows + i * n_features, n_features)
+            squared_norm = _squared_norm_unrolled(
+                X_rows + i * n_features, n_features
+            )
             nearest_distance = squared_norm + row[nearest]
             if nearest_distance < 0:
                 nearest_distance = 0

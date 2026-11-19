@@ -1,5 +1,8 @@
 """Tests of the two-level assignment of EMeans."""
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -446,3 +449,68 @@ def test_emeans_invalid_assignment(assignment):
     X = np.eye(10)
     with pytest.raises(ValueError, match="assignment must be"):
         EMeans(n_clusters=2, assignment=assignment).fit(X)
+
+
+_ALLOCATION_FAILURE_CODE = """
+import resource
+
+import numpy as np
+
+from sklearn_emeans._kernels import (
+    _emeans_steps_two_level,
+    _labels_inertia_two_level,
+)
+
+rng = np.random.RandomState(0)
+X = rng.uniform(size=(200_000, 64))
+centers = X[:100].copy()
+cells = X[:10].copy()
+cell_of_center = np.zeros(100, dtype=np.int32)
+weight_ema = np.ones(100)
+labels = np.empty(len(X), dtype=np.int32)
+rows = np.arange(len(X), dtype=np.intp)
+step_sizes = np.array([0.5])
+
+
+def steps(n_rows):
+    _emeans_steps_two_level(
+        X, rows[:n_rows], n_rows, centers, weight_ema, step_sizes, None, None,
+        0, 0, None, 2, cells, cell_of_center, 10, 1.15,
+    )
+
+
+def labels_inertia(n_rows):
+    _labels_inertia_two_level(
+        X[:n_rows], centers, weight_ema, cells, cell_of_center, 10, 1.15,
+        labels[:n_rows], 2,
+    )
+
+
+# Starts the threads.
+steps(1000)
+labels_inertia(1000)
+
+# No room left for the copy of the batch (100 MB) and for the work arrays of
+# the pairs (40 MB).
+with open("/proc/self/statm") as f:
+    vm_size = int(f.read().split()[0]) * resource.getpagesize()
+resource.setrlimit(resource.RLIMIT_AS, (vm_size + 20 * 2**20,) * 2)
+
+for name, function in [("steps", steps), ("labels", labels_inertia)]:
+    try:
+        function(len(X))
+    except MemoryError:
+        print(name, "MemoryError")
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs RLIMIT_AS and /proc")
+def test_two_level_allocation_failure():
+    result = subprocess.run(
+        [sys.executable, "-c", _ALLOCATION_FAILURE_CODE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.split() == ["steps", "MemoryError", "labels", "MemoryError"]

@@ -407,6 +407,8 @@ def test_errors(xp_name, device):
         emeans = EMeans(n_clusters=2).fit(X_xp)
         with pytest.raises(ValueError, match="features"):
             emeans.predict(X_xp[:, :3])
+        with pytest.raises(ValueError, match="not supported for array API"):
+            EMeans(n_clusters=2, assignment="two-level").fit(X_xp)
 
 
 def test_no_dispatch_without_config(xp_name, device):

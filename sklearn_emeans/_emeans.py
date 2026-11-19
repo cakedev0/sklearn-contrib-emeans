@@ -425,6 +425,27 @@ class EMeans(
             'greedy' is experimental: its algorithm may change from one
             version to the next, and its results with it.
 
+    assignment : {'exact', 'two-level'}, default='exact'
+        How the samples are assigned to their center during the fit:
+
+        'exact': each sample is compared to all the centers, which costs
+        `O(n_samples * n_clusters)` per epoch.
+
+        'two-level': the centers are grouped in `round(sqrt(n_clusters))`
+        cells, which follow the centers during the fit. A sample is compared
+        to the cells, then to the centers of its nearest cells only (16 at
+        most, fewer when the nearest one is clearly nearer than the others).
+        An epoch costs about `O(n_samples * sqrt(n_clusters))`. The inertia
+        is typically 0.1% to 0.3% higher than with 'exact'. See the Notes
+        section.
+
+        Below 1024 clusters, where it would not be faster, 'two-level' is the
+        same as 'exact'. It only supports dense NumPy inputs.
+
+        .. warning::
+            'two-level' is experimental: its algorithm may change from one
+            version to the next, and its results with it.
+
     random_state : int, RandomState instance or None, default=None
         Determines random number generation for centroid initialization, the
         order of the samples in each epoch and the revival of clusters.
@@ -436,10 +457,12 @@ class EMeans(
         Coordinates of cluster centers.
 
     labels_ : ndarray of shape (n_samples,)
-        Labels of each point.
+        Labels of each point. With `assignment='two-level'`, a few samples
+        don't get their closest center.
 
     inertia_ : float
         Sum of squared distances of samples to their closest cluster center.
+        With `assignment='two-level'`, to the center of their label.
 
     batch_size_ : int
         Size of the mini-batches, given by the scaling law of the authors. It
@@ -476,6 +499,21 @@ class EMeans(
     size. The final centers are the means of the samples assigned to each
     center during the last epoch. `labels_` and `inertia_` are then computed
     with an extra pass over the data, so that they match the final centers.
+
+    With `assignment='two-level'`, only the assignment changes. The initial
+    cells are an e-means of the initial centers. Before each mini-batch, each
+    cell center moves to the weighted mean of the centers of its cell, then
+    each center goes to the cell of the nearest cell center. A sample probes
+    its nearest cell, and the cells whose distance to the sample is at most
+    1.15 times the distance of the nearest one, limited to the 16 nearest
+    cells. It is assigned to the nearest center of the cells it probes.
+    `labels_` and `inertia_` come from a last pass with the same assignment,
+    so a few samples have a label that is not their closest center: use
+    `predict` for the exact labels, and `score` for the exact inertia, both
+    in `O(n_samples * n_clusters)`. The initializations 'k-means++' and
+    'k-means||' and `revival='greedy'` are not two-level: they keep their
+    cost in `O(n_samples * n_clusters)`, which then dominates the fit. The
+    fit keeps a copy of each mini-batch (`batch_size_` samples).
 
     For array API inputs, the Cython kernels are replaced by array operations
     of the library of the input. The random numbers are drawn on the host in

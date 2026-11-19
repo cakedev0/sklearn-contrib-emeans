@@ -310,11 +310,12 @@ committed.
   of the selection: the compiler can't vectorize a sum of floats in order.
   It now has 8 partial sums.
 
-On DEEP 10M at `k=10k`, where the fit takes 5.8 s: the steps take 3.1 s
-(of which 0.45 s to copy the batches), the check of the input by scikit-learn
-1.3 s, the labelling pass 1.0 s, and the permutations, the inits and the rest
-of the Python code about 1.2 s. The fine search is about 60% of the steps and
-of the labelling pass, the coarse search 15%.
+On DEEP 10M at `k=10k`, in the build with timers, where the fit takes 6.6 s
+(5.8 s without them): the steps take 3.1 s (of which 0.45 s to copy the
+batches), the check of the input by scikit-learn 1.3 s, the labelling pass
+1.0 s, and the permutations, the inits and the rest of the Python code about
+1.2 s. The fine search is about 60% of the steps and of the labelling pass,
+the coarse search 15%.
 
 ### What does not meet the target
 

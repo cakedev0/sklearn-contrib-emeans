@@ -22,6 +22,7 @@ py.install_sources(
     '_greedy_revival.py',
     '_kmeans_parallel.py',
     '_kmeans_plusplus.py',
+    '_two_level_triton.py',
   ],
   subdir: 'sklearn_emeans',
 )

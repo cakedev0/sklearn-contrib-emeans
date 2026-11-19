@@ -254,6 +254,54 @@ def _assign(xp, X, centers):
     return labels[0] if len(labels) == 1 else xp.concat(labels)
 
 
+def two_level_namespace(xp, X):
+    """Namespace and array that run the two-level assignment of X.
+
+    The two-level assignment has Triton kernels, which run on PyTorch tensors
+    on CUDA devices. A CuPy array is viewed as a PyTorch tensor, without
+    copy. Returns the namespace of PyTorch, the tensor and a function that
+    converts a tensor back to the library of X.
+    """
+    if not (_is_cupy(xp) or (_is_torch(xp) and X.device.type == "cuda")):
+        raise ValueError(
+            "assignment='two-level' is not supported for array API inputs with "
+            "array_api_dispatch=True, except for PyTorch tensors on CUDA devices "
+            f"and CuPy arrays. Got an array of {xp.__name__}"
+            + (f" on the device {device(X)!r}." if _is_torch(xp) else ".")
+        )
+    try:
+        import torch
+        import triton  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "assignment='two-level' on a CUDA device needs PyTorch and Triton "
+            "(the `triton` package, installed with the Linux wheels of PyTorch "
+            "for CUDA), also for CuPy arrays. Use assignment='exact' without "
+            "them."
+        ) from exc
+    if _is_torch(xp):
+        return xp, X, lambda array: array
+
+    import cupy
+
+    X = torch.from_dlpack(X)
+    return array_api_compat.array_namespace(X), X, cupy.from_dlpack
+
+
+def two_level_assigner(X, cells, cell_of_center, max_probes, ratio, max_rows):
+    """The two-level assignment of rows of X to centers, from their cells.
+
+    `X`, `cells` and `cell_of_center` are PyTorch tensors on a CUDA device,
+    see `_two_level_triton.TwoLevelAssigner`.
+    """
+    import torch
+
+    from sklearn_emeans._two_level_triton import TwoLevelAssigner
+
+    max_abs = max(abs(float(bound)) for bound in torch.aminmax(X))
+    return TwoLevelAssigner(cells, cell_of_center, max_probes, ratio, max_rows, max_abs)
+
+
 def emeans_steps(
     xp,
     X,
@@ -267,11 +315,13 @@ def emeans_steps(
     first_step,
     revival_period,
     revive,
+    assigner=None,
 ):
     """Consecutive e-means steps on the batches of `rows`.
 
     Same computations as `_kernels._emeans_steps`, but the sums of the batch
-    rows and the EMA updates are in the dtype of X and not in float64.
+    rows and the EMA updates are in the dtype of X and not in float64. With
+    an `assigner`, same computations as `_kernels._emeans_steps_two_level`.
 
     Parameters
     ----------
@@ -305,6 +355,10 @@ def emeans_steps(
         Takes `(centers, weight_ema)` and returns them with the dead clusters
         revived.
 
+    assigner : `_two_level_triton.TwoLevelAssigner` or None
+        If not None, the two-level assignment, in place of the exact one. Its
+        cells are refreshed before each step.
+
     Returns
     -------
     centers, weight_ema, epoch_sums, epoch_counts : the updated arrays
@@ -317,7 +371,11 @@ def emeans_steps(
         # The standard doesn't allow slices that stop out of bounds.
         batch = rows[s * batch_size : min((s + 1) * batch_size, n_rows)]
         X_batch = xp.take(X, batch, axis=0)
-        labels = _assign(xp, X_batch, centers)
+        if assigner is None:
+            labels = _assign(xp, X_batch, centers)
+        else:
+            assigner.refresh(centers, weight_ema)
+            labels = assigner.assign(X_batch)
         sums, counts = _cluster_sums(xp, X_batch, labels, n_clusters)
         if epoch_sums is not None:
             epoch_sums = epoch_sums + xp.astype(sums, acc_dtype)
@@ -331,11 +389,15 @@ def emeans_steps(
     return centers, weight_ema, epoch_sums, epoch_counts
 
 
-def revive_dead_clusters(xp, centers, weight_ema, random_state, threshold):
+def revive_dead_clusters(
+    xp, centers, weight_ema, random_state, threshold, assigner=None
+):
     """Split heavy clusters to replace the dead ones.
 
     Same as `_emeans._revive_dead_clusters`, which this function runs on the
     host: only the EMA weights and the centers to split are copied there.
+    With the two-level assignment, a dead cluster also goes to the cell of
+    its donor in `assigner`.
     """
     from sklearn_emeans._emeans import _revival_indices, _split_centers
 
@@ -358,36 +420,59 @@ def revive_dead_clusters(xp, centers, weight_ema, random_state, threshold):
     donor_weights = xp.take(weight_ema, donor_indices, axis=0) / 2
     weight_ema = _set_rows(xp, weight_ema, donor_indices, donor_weights)
     weight_ema = _set_rows(xp, weight_ema, dead_indices, donor_weights)
+    if assigner is not None:
+        assigner.move_to_cells_of(dead_indices, donor_indices)
     return centers, weight_ema
 
 
-def revive_greedy(xp, greedy, centers, weight_ema):
+def revive_greedy(xp, greedy, centers, weight_ema, assigner=None):
     """Greedy revival of the clusters, which runs on the host.
 
     `greedy` is a `_greedy_revival.GreedyRevival`: only the centers and the
     EMA weights are copied to the host, where it has its sample of the data.
+    With the two-level assignment, the cells of the centers are copied too.
     """
     centers_host = np.array(to_numpy(xp, centers))
     weight_ema_host = np.array(to_numpy(xp, weight_ema), dtype=np.float64)
-    if greedy(centers_host, weight_ema_host) == 0:
+    cell_of_center = None
+    if assigner is not None:
+        cell_of_center = np.array(to_numpy(xp, assigner.cell_of_center))
+    if greedy(centers_host, weight_ema_host, cell_of_center) == 0:
         return centers, weight_ema
+    if assigner is not None:
+        assigner.cell_of_center[:] = index_array(xp, cell_of_center, device(centers))
     return (
         from_numpy(xp, centers_host, dtype_name(xp, centers), device(centers)),
         from_numpy(xp, weight_ema_host, dtype_name(xp, weight_ema), device(weight_ema)),
     )
 
 
-def labels_inertia(xp, X, centers):
-    """Labels (int32) and inertia (float) of X."""
+def labels_inertia(xp, X, centers, assigner=None):
+    """Labels (int32) and inertia (float) of X.
+
+    With an `assigner`, whose cells must be refreshed, the labels come from
+    the two-level assignment and the inertia is the sum of the squared
+    distances of the rows to the center of their label.
+    """
     half_squared_norms = _half_squared_norms(xp, centers)
     acc_dtype = getattr(xp, accumulator_dtype(xp, device(X)))
     labels = []
     inertia = 0.0
-    for chunk in _chunks(X.shape[0], centers.shape[0]):
+    if assigner is None:
+        chunks = _chunks(X.shape[0], centers.shape[0])
+    else:
+        chunks = [
+            slice(start, min(start + assigner.max_rows, X.shape[0]))
+            for start in range(0, X.shape[0], assigner.max_rows)
+        ]
+    for chunk in chunks:
         X_chunk = X[chunk, :]
-        chunk_labels = xp.argmax(
-            _scores(xp, X_chunk, centers, half_squared_norms), axis=1
-        )
+        if assigner is None:
+            chunk_labels = xp.argmax(
+                _scores(xp, X_chunk, centers, half_squared_norms), axis=1
+            )
+        else:
+            chunk_labels = assigner.assign(X_chunk)
         # Not from the scores: in float32, they lose digits by cancellation.
         # The sums of the rows are added in the widest dtype of the device.
         difference = X_chunk - xp.take(centers, chunk_labels, axis=0)

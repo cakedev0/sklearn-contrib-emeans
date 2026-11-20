@@ -202,6 +202,8 @@ def main():
                     "max_probes": _emeans._TWO_LEVEL_MAX_PROBES,
                     "ratio": _emeans._TWO_LEVEL_RATIO,
                     "threads": n_threads,
+                    # The threads are capped by this limit of OpenBLAS.
+                    "openblas_max_threads": _emeans._openblas_max_threads(),
                     "slot": os.environ.get("BENCHLOCK_SLOT"),
                     "assume_finite": args.assume_finite,
                     # Below this number of clusters, "two-level" is "exact".

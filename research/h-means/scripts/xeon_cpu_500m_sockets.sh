@@ -3,9 +3,14 @@
 # 128 threads on the two sockets. The data is 192 GB, more than what one
 # socket surely has free, so this needs the whole machine:
 #   benchlock --tag "h-means 500M one or two sockets" all -- ./xeon_cpu_500m_sockets.sh
+# EMeans does not use more threads than the compiled limit of OpenBLAS, which
+# is 64 in the wheels of SciPy: there, the second run also has 64 threads.
+# ENV_BIN is the bin directory of the environment. With the OpenBLAS of
+# conda-forge (limit of 128 threads):
+#   ENV_BIN=$PWD/cf/.pixi/envs/default/bin OUT=res/grid_500m_sockets_cf.jsonl
 HMEANS=${HMEANS:-$HOME/work/hmeans-cpu}
 cd $HMEANS
-export PATH=$PWD/venv/bin:$PATH
+export PATH=${ENV_BIN:-$PWD/venv/bin}:$PATH
 OUT=${OUT:-res/grid_500m_sockets.jsonl}
 # Free the page cache of the other datasets, to leave the memory of the second
 # socket to the data.

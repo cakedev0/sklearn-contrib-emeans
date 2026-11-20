@@ -22,8 +22,17 @@ for m in "$@"; do
   [ $m -ge 100 ] && repeat=1
   if [ $m -gt 100 ]; then
     data=deep500M
-    run="numactl --cpunodebind=4-7 --preferred=4"
+    run="numactl --cpunodebind=4-7 --preferred-many=4-7"
     flags="--in-memory"
+    # Free the page cache of the other datasets, to leave the memory of the
+    # second socket to the data.
+    python - <<'P'
+import glob, os
+for path in glob.glob(os.path.expanduser("~/work/hkm/data/*.[fn][bp][iy]*")):
+    fd = os.open(path, os.O_RDONLY)
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    os.close(fd)
+P
   fi
   ks=""; ref=""
   for size in 100000 10000 1000 100; do

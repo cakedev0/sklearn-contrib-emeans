@@ -59,13 +59,19 @@ def read_in_memory(path, n_samples, n_features, offset):
 def load(name, n=None, in_memory=False):
     for directory in DIRS:
         if name.startswith("deep"):
+            # `.fbin` has a header of 8 bytes, `.f32` is the raw float32 rows.
             path = os.path.join(directory, name + ".fbin")
+            offset = 8
+            if not os.path.exists(path):
+                path = os.path.join(directory, name + ".f32")
+                offset = 0
             if os.path.exists(path):
                 n_all = DEEP_N_SAMPLES[name]
                 if in_memory:
-                    return read_in_memory(path, n_all if n is None else n, 96, 8)
+                    n_read = n_all if n is None else n
+                    return read_in_memory(path, n_read, 96, offset)
                 X = np.memmap(
-                    path, dtype=np.float32, mode="r", offset=8, shape=(n_all, 96)
+                    path, dtype=np.float32, mode="r", offset=offset, shape=(n_all, 96)
                 )
                 break
         else:
@@ -78,8 +84,36 @@ def load(name, n=None, in_memory=False):
     return np.ascontiguousarray(X if n is None else X[:n], dtype=np.float32)
 
 
+def memory_per_numa_node():
+    """Memory of this process on each NUMA node, in GB (Linux only)."""
+    try:
+        with open("/proc/self/numa_maps") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    usage = {}
+    for line in lines:
+        fields = line.split()
+        page_kb = 4
+        for field in fields:
+            if field.startswith("kernelpagesize_kB="):
+                page_kb = int(field.split("=")[1])
+        for field in fields:
+            if (
+                field[0] == "N"
+                and "=" in field
+                and field[1 : field.index("=")].isdigit()
+            ):
+                node, n_pages = field[1:].split("=")
+                usage[int(node)] = usage.get(int(node), 0) + int(n_pages) * page_kb
+    return [round(usage.get(node, 0) / 2**20, 1) for node in range(max(usage) + 1)]
+
+
 def evaluate(X_eval, centers, labels, n_threads):
     """Exact inertia of the centers and inertia of the labels, per sample."""
+    # The exact assignment needs 256 * n_clusters distances per thread: 5 GB
+    # with 5M clusters. Keep them under 80 GB in total.
+    n_threads = max(1, min(n_threads, int(80e9 // (256 * 4 * len(centers)))))
     exact = np.empty(len(X_eval), dtype=np.int32)
     with threadpool_limits(limits=1, user_api="blas"):
         inertia_exact = _labels_inertia(X_eval, centers, exact, n_threads)
@@ -178,6 +212,8 @@ def main():
                     "inertia_fit": emeans.inertia_ / n_samples,
                     "max_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                     / 2**20,
+                    # After the fit, so without its work buffers.
+                    "numa_gb": memory_per_numa_node(),
                 }
                 result.update(
                     evaluate(

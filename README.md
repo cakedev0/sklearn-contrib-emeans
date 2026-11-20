@@ -56,7 +56,7 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   experimental: its algorithm may change from one version to the next, and
   its results with it.
 - `assignment="two-level"` makes the fit much faster with many clusters, for
-  an inertia that is typically 0.1% to 0.2% higher. The centers are grouped
+  an inertia that is typically 0.05% to 0.15% higher. The centers are grouped
   in `sqrt(n_clusters)` cells that follow them during the fit, and a sample is
   only compared to the centers of its nearest cells: an epoch costs about
   `O(n_samples * sqrt(n_clusters))` instead of `O(n_samples * n_clusters)`.

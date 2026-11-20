@@ -138,7 +138,7 @@ The rest of the algorithm is unchanged. The cells follow the centers during the
 fit: before each mini-batch, each cell center moves to the mean of its
 centers, and each center goes to the cell of its nearest cell center. A sample
 probes its nearest cell, and the cells that are at most 1.2 times as far from
-it, up to 16 cells.
+it, up to 16 cells. The pass that computes `labels_` does the same.
 
 On one socket of a Xeon 6787P server with 64 threads, with 5 epochs:
 
@@ -152,28 +152,28 @@ On one socket of a Xeon 6787P server with 64 threads, with 5 epochs:
      - inertia of `labels_`
    * - SIFT (1M samples, 128 features)
      - 10,000
-     - 4.9 s
-     - 1.0 s
-     - +0.18%
+     - 4.8 s
+     - 1.1 s
+     - +0.09%
    * - Wolt CLIP (1M samples, 512 features)
      - 10,000
-     - 10.9 s
-     - 2.5 s
-     - +0.16%
+     - 11.1 s
+     - 2.6 s
+     - +0.14%
    * - DEEP (10M samples, 96 features)
      - 10,000
      - 40 s
-     - 5.8 s
-     - +0.11%
+     - 6.3 s
+     - +0.10%
    * - DEEP (10M samples, 96 features)
      - 100,000
      - 485 s
-     - 11.6 s
-     - +0.16%
+     - 13.1 s
+     - +0.11%
 
 What to know before using it:
 
-- The inertia is typically 0.1% to 0.2% higher than with `"exact"`, on
+- The inertia is typically 0.05% to 0.15% higher than with `"exact"`, on
   embedding datasets with 100 to 1,000 samples per cluster.
 - `labels_` and `inertia_` come from a two-level assignment too: a fraction of
   a percent of the samples don't get their closest center, and `inertia_` is

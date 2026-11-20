@@ -222,60 +222,65 @@ prototype:
 ### Results
 
 One socket of the Xeon 6787P server (`benchlock` slot `s1`), 64 threads, 5
-epochs, random init, one seed. `EMeans` exact, the prototype (`v4`, adaptive)
-and `EMeans` two-level ran in the same `benchlock` call. Times are fit times in
-seconds, the median of 3 fits for two-level. The loss is the inertia against
-`EMeans` exact, on 1M random samples (200k at `k=100k`): "centers" is the exact
-inertia of the centers, "labels" the one of `labels_`.
+epochs, random init, one seed. `EMeans` exact, the prototype (`v4`, adaptive,
+with its ratio of 1.15 and with 1.2) and `EMeans` two-level ran in the same
+`benchlock` call. Times are fit times in seconds, the median of 3 fits for
+two-level. The loss is the inertia against `EMeans` exact, on 1M random
+samples (200k at `k=100k`): "centers" is the exact inertia of the centers,
+"labels" the one of `labels_`.
 
-| data | k | exact | prototype | two-level | speed-up | loss (centers) | loss (labels) |
-|---|---|---|---|---|---|---|---|
-| SIFT 1M | 10k | 4.85 | 1.48 | 0.98 | 5.0x | +0.17% | +0.18% |
-| GloVe 1.18M | 10k | 6.89 | 2.56 | 2.36 | 2.9x | +0.03% | +0.06% |
-| CLIP 1M | 10k | 10.9 | 1.92 | 2.53 | 4.3x | +0.15% | +0.16% |
-| DEEP 10M | 10k | 40.4 | 10.1 | 5.82 | 6.9x | +0.10% | +0.11% |
-| DEEP 10M | 100k | 485 | 16.6 | 11.6 | 42x | +0.14% | +0.16% |
+| data | k | exact | prototype 1.15 | prototype 1.2 | two-level | speed-up | loss (centers) | loss (labels) |
+|---|---|---|---|---|---|---|---|---|
+| SIFT 1M | 10k | 4.84 | 1.44 | 1.72 | 1.05 | 4.6x | +0.04% | +0.09% |
+| GloVe 1.18M | 10k | 6.90 | 2.55 | 2.61 | 2.42 | 2.9x | +0.02% | +0.05% |
+| CLIP 1M | 10k | 11.1 | 1.91 | 2.28 | 2.59 | 4.3x | +0.12% | +0.14% |
+| DEEP 10M | 10k | 40.4 | 10.0 | 12.9 | 6.29 | 6.4x | +0.05% | +0.10% |
+| DEEP 10M | 100k | 485 | 16.0 | 20.4 | 13.1 | 37x | +0.05% | +0.11% |
 
-- The loss on labels is at most +0.18%. The loss of the prototype in these
-  runs is +0.29%, +0.04%, +0.10%, +0.30% and +0.44% (same seed, but its
+- The loss on labels is at most +0.14%. The loss of the prototype in these
+  runs is +0.29%, +0.04%, +0.10%, +0.30% and +0.44% with its ratio of 1.15,
+  and +0.09%, +0.06%, 0.00%, +0.17% and +0.28% with 1.2 (same seed, but its
   evaluation sample is another one, so compare to within about 0.05%).
-- Two-level is faster than the prototype on four cases out of five, by 1.1x
-  to 1.7x. On CLIP it is slower (2.53 s against 1.92 s): see "What does not
-  meet the target".
+- Two-level is faster than the prototype on four cases out of five: by 1.1x
+  to 2.1x with the same ratio, and by 1.05x to 1.6x against the prototype
+  with its ratio of 1.15. On CLIP it is slower (2.59 s against 2.28 s, and
+  1.91 s with 1.15): see "What does not meet the target".
 
 Scaling at 1,000 samples per cluster on DEEP (the first `n` samples of DEEP
 100M):
 
-| n | k | exact | prototype | two-level | loss (labels) |
-|---|---|---|---|---|---|
-| 1M | 1k | 0.67 | 1.21 | 0.60 | +0.07% |
-| 3M | 3k | 3.43 | 3.17 | 1.69 | +0.10% |
-| 10M | 10k | 40.5 | 10.1 | 5.78 | +0.11% |
-| 30M | 30k | 402 | 34.0 | 22.1 | +0.10% |
+| n | k | exact | prototype 1.15 | prototype 1.2 | two-level | loss (labels) |
+|---|---|---|---|---|---|---|
+| 1M | 1k | 0.68 | 1.24 | 1.53 | 0.62 | +0.01% |
+| 3M | 3k | 3.44 | 3.10 | 3.69 | 1.86 | +0.05% |
+| 10M | 10k | 40.3 | 10.3 | 12.6 | 6.27 | +0.08% |
+| 30M | 30k | 405 | 34.7 | 42.9 | 24.6 | +0.08% |
 
 - Exponent of the time against `n`, from 1M to 30M: 1.88 for exact, 0.98 for
-  the prototype, 1.06 for two-level. The local exponent of two-level rises
-  with `n`: 0.95, 1.02, 1.22.
+  the prototype, 1.08 for two-level. The local exponent of two-level rises
+  with `n`: 1.00, 1.01, 1.24. It should tend to 1.5: the number of
+  comparisons grows like `n sqrt(k)`, and the costs that are linear in `n`
+  (check of the input, permutations, copies of the batches) still take most
+  of the time at 1M samples.
 - At 1M samples and `k=1000`, `"two-level"` is the exact assignment in the
   package (below 1024 clusters). The two-level time in the table has this
   fallback turned off (`--min-clusters 1`).
 
 Where two-level starts to win (same machine, `exact` / `two-level` in seconds,
-median of 3 fits, 2 on DEEP 10M, with the fallback turned off, measured
-before the partial sums of the squared norm):
+median of 3 fits, 2 on DEEP 10M, with the fallback turned off):
 
 | k | SIFT 1M | DEEP 1M | CLIP 1M | DEEP 10M |
 |---|---|---|---|---|
-| 256 | 0.43 / 0.55 | 0.41 / 0.57 | 1.14 / 1.40 | 3.15 / 4.06 |
-| 512 | 0.54 / 0.60 | 0.51 / 0.61 | 1.33 / 1.63 | 3.95 / 4.22 |
-| 1024 | 0.76 / 0.59 | 0.70 / 0.63 | 1.88 / 1.75 | 5.52 / 4.22 |
-| 2048 | 1.11 / 0.66 | 0.97 / 0.67 | 2.74 / 1.92 | 8.31 / 4.52 |
-| 4096 | 1.85 / 0.82 | 1.66 / 0.76 | 4.75 / 2.18 | - |
+| 512 | 0.55 / 0.54 | 0.48 / 0.65 | 1.02 / 1.27 | 3.78 / 4.33 |
+| 1024 | 0.72 / 0.58 | 0.69 / 0.65 | 1.51 / 1.33 | 5.37 / 4.40 |
+| 2048 | 1.02 / 0.64 | 0.98 / 0.69 | 2.40 / 1.59 | 8.12 / 4.75 |
 
-The time of two-level hardly depends on `k` in this range (about 0.55 s per
-million samples with 96 or 128 features), so it loses up to 512 clusters and
-wins from 1024. Hence the fallback to the exact assignment below 1024
-clusters.
+The time of two-level hardly depends on `k` in this range (about 0.6 s per
+million samples with 96 or 128 features), so it loses or ties at 512 clusters
+and wins from 1024. Hence the fallback to the exact assignment below 1024
+clusters. An earlier run from 128 to 4096 clusters, with a ratio of 1.15 for
+the steps and 1.3 for the labels, gave the same crossover
+(`results/xeon/cpu_small_k.jsonl`).
 
 Commands (on the server, in a directory with a venv where the branch is
 installed):
@@ -284,14 +289,39 @@ installed):
 benchlock --tag "h-means cpu main" s1 -- ./scripts/xeon_cpu_main.sh
 benchlock --tag "h-means cpu scaling" s1 -- ./scripts/xeon_cpu_scaling.sh
 python show_cpu.py results/xeon/cpu_main.jsonl results/xeon/cpu_main_proto.jsonl
-OMP_NUM_THREADS=64 python bench_cpu.py --data sift1m --k 256 512 1024 2048 4096 \
+OMP_NUM_THREADS=64 python bench_cpu.py --data sift1m --k 512 1024 2048 \
     --min-clusters 1 --repeat 3 --out res/small_k.jsonl
 ```
+
+### The ratio
+
+A sample probes the cells that are at most `ratio` times as far as its
+nearest cell. The prototype uses 1.15, in the steps and in the labelling
+pass. With that, the loss on labels was +0.30% on SIFT 1M, right at the
+target of 0.3%. Loss on labels and fit time in seconds, one fit each (2 for
+the first setting), in one `benchlock` call (`results/xeon/cpu_ratio.jsonl`):
+
+| data | k | 1.15 | 1.15, labels 1.3 | 1.2 |
+|---|---|---|---|---|
+| SIFT 1M | 10k | +0.30%, 0.97 | +0.18%, 1.06 | +0.09%, 1.05 |
+| GloVe 1.18M | 10k | +0.06%, 2.52 | +0.06%, 2.61 | +0.05%, 2.70 |
+| CLIP 1M | 10k | +0.21%, 2.41 | +0.16%, 2.36 | +0.14%, 2.66 |
+| DEEP 10M | 10k | +0.21%, 5.62 | +0.11%, 6.22 | +0.10%, 6.84 |
+| DEEP 10M | 100k | +0.23%, 11.3 | +0.16%, 12.3 | +0.11%, 13.8 |
+
+- A wider ratio for the labelling pass only does not change the centers, but
+  99.5% to 99.95% of the samples then get their closest center (98.4% to
+  99.5% with 1.15).
+- 1.2 everywhere gives better centers, for 8% to 22% more time than 1.15
+  everywhere. 99.3% to 99.8% of the samples get their closest center.
+
+The package uses 1.2 everywhere: one rule, and the lowest loss of the three.
 
 ### What mattered for the speed
 
 Per-phase times are from a build with timers around each phase, not
-committed.
+committed. They were measured with a ratio of 1.15 for the steps and 1.3 for
+the labelling pass.
 
 - **Size of the GEMMs.** With 256 rows per GEMM as in the exact assignment
   and in the prototype, a product costs 2 to 3 times more than in the big GEMM
@@ -311,7 +341,7 @@ committed.
   of the selection: the compiler can't vectorize a sum of floats in order.
   It now has 8 partial sums.
 
-On DEEP 10M at `k=10k`, in the build with timers, where the fit takes 6.6 s
+On DEEP 10M at `k=10k`, in the build with timers, where the fit took 6.6 s
 (5.8 s without them): the steps take 3.1 s (of which 0.45 s to copy the
 batches), the check of the input by scikit-learn 1.3 s, the labelling pass
 1.0 s, and the permutations, the inits and the rest of the Python code about
@@ -320,22 +350,19 @@ the coarse search 15%.
 
 ### What does not meet the target
 
-- **CLIP 1M is slower than the prototype**: 2.53 s against 1.92 s. Most of
+- **CLIP 1M is slower than the prototype**: 2.59 s against 2.28 s with the
+  same ratio, and 1.91 s with the ratio of 1.15 of the prototype. Most of
   the difference is the check of the input by scikit-learn (0.55 s for
   1M x 512 in float32, sequential), which the prototype does not do. With
-  `sklearn.config_context(assume_finite=True)`, two-level takes 2.0 s to
-  2.2 s on CLIP (and 5.2 s on DEEP 10M at `k=10k`, 0.9 s on SIFT). The rest
-  is the wider ratio of the labelling pass.
+  `sklearn.config_context(assume_finite=True)`, the fit was about 0.4 s
+  shorter on CLIP (2.0 s to 2.2 s against 2.4 s to 2.6 s) and 0.6 s shorter
+  on DEEP 10M at `k=10k` (measured with the earlier ratios).
+- **The ratio is not the one of the prototype**: 1.2 in place of 1.15, see
+  "The ratio".
 - Prefetching the rows in the copies of the batch, and running the short
   GEMMs last so that the threads wait less at the end of the fine search,
   changed nothing measurable (interleaved A/B on the 5 cases), so they are
   not in.
-- **The labelling ratio is not the one of the prototype.** With 1.15 for the
-  steps and for the labels, the loss on labels was +0.30% on SIFT 1M
-  (40335.3 against 40214.4), right at the limit, and +0.21% to +0.23% on CLIP
-  and DEEP. With 1.3 for the labelling pass only, it is +0.18% at most, for
-  0% to 10% more time. A ratio of 1.2 everywhere gives +0.05% to +0.14% for
-  8% to 22% more time.
 
 ### Semantics, for another backend
 

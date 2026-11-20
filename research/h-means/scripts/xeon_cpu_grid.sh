@@ -11,10 +11,14 @@
 # the threads to the second socket and takes the memory of the first one only
 # when the second one is full. Its data is read in anonymous memory, the other
 # runs map the file.
-export OMP_NUM_THREADS=64
+# THREADS and ENV_BIN (the bin directory of the environment) change the number
+# of threads and the BLAS. With MKL and one pinned thread per core:
+#   ENV_BIN=$PWD/mkl/.pixi/envs/default/bin THREADS=86 OMP_PROC_BIND=close \
+#     OMP_PLACES=cores OUT=res/grid_mkl86.jsonl benchlock ...
+export OMP_NUM_THREADS=${THREADS:-64}
 HMEANS=${HMEANS:-$HOME/work/hmeans-cpu}
 cd $HMEANS
-export PATH=$PWD/venv/bin:$PATH
+export PATH=${ENV_BIN:-$PWD/venv/bin}:$PATH
 OUT=${OUT:-res/grid.jsonl}
 for m in "$@"; do
   n=${m}000000

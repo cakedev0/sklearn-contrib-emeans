@@ -33,6 +33,9 @@ clusters for the greedy revival, with the same assignment and the same
 parallelism over centers. `_trial_splits` and `_trial_splits_sparse` then try
 to split some clusters in two, in parallel over these clusters.
 
+`_emeans_steps_two_level` and `_labels_inertia_two_level` are the two-level
+assignment, for dense X: see the section at the end of the file.
+
 `_all_finite` and `_shuffle` do what `fit` would otherwise spend sequential
 time on with many samples: the check of the input and the permutation of each
 epoch.
@@ -43,6 +46,7 @@ from cython.parallel cimport parallel, prange
 from cpython.exc cimport PyErr_CheckSignals
 from cpython.pycapsule cimport PyCapsule_GetPointer, PyCapsule_IsValid
 from cpython.ref cimport PyObject
+from libc.float cimport DBL_MAX, FLT_MAX
 from libc.math cimport INFINITY
 from libc.stdint cimport uint32_t, uint64_t
 from libc.stdlib cimport calloc, malloc, free
@@ -2110,3 +2114,1082 @@ cdef void _trial_split_sparse(
                                         centers + n_features, second_squared_norm),
         )
     gain[0] = (whole - split) * n_rows / (n_rows // 2)
+
+
+# Two-level assignment
+# --------------------
+#
+# The centers are grouped in cells: a cell is a coarse center and the centers
+# that are nearer to it than to the other coarse centers. A row is compared to
+# the coarse centers, then only to the centers of the cells it probes:
+#
+# - its nearest cell;
+# - the cells whose squared distance to the row is at most `ratio`² times the
+#   one of the nearest cell, limited to the `max_probes` nearest cells (ties go
+#   to the lowest cell index).
+#
+# The row gets the nearest of these centers, the lowest index on ties. A cell
+# without center is never probed.
+#
+# The cells follow the centers: before each assignment (`_refresh_cells`),
+# each coarse center moves to the mean of the centers of its cell, weighted by
+# their EMA weights, then each center goes to the cell of its nearest coarse
+# center.
+#
+# The (row, cell) pairs are sorted by cell, so that the centers of a cell are
+# compared to the rows that probe it with one GEMM per chunk of pairs
+# (`_search`). The chunks don't depend on the number of threads, and neither
+# does the result.
+
+# Number of rows compared to the coarse centers by one GEMM, and number of
+# (row, cell) pairs of a cell compared to its centers by one GEMM. These GEMMs
+# have about sqrt(n_clusters) columns: with the 256 rows of CHUNK_SIZE, they
+# are small enough for OpenBLAS to be 2 to 3 times slower per product (64
+# threads, AVX-512).
+cdef intp_t COARSE_CHUNK_SIZE = 1024
+cdef intp_t PAIR_CHUNK_SIZE = 1024
+
+# The centers of a cell are compared by blocks of this number of centers, which
+# bounds the size of the buffer of distances of each thread.
+cdef intp_t CELL_BLOCK_SIZE = 1024
+
+# Number of rows assigned together by `_labels_inertia_two_level`, a multiple
+# of CHUNK_SIZE. It bounds the size of the buffers of the pairs.
+cdef intp_t LABELS_BLOCK_SIZE = 1024 * CHUNK_SIZE
+
+# Lower bound of the EMA weight of a center in the mean of its cell.
+cdef double MIN_CELL_WEIGHT = 1e-12
+
+# Atomic counters of a two-level step, as the ones of `_run_steps`: for each
+# phase, the work claimed so far, then the work done so far. N_TASKS is the
+# number of GEMM tasks of the step, set by the TASKS phase.
+cdef enum:
+    TL_GATHER = 0
+    TL_CELL_LISTS = 2
+    TL_CELL_MEANS = 4
+    TL_CELL_ASSIGN = 6
+    TL_CELL_SORT = 8
+    TL_CELL_COPY = 10
+    TL_COARSE = 12
+    TL_COUNT = 14
+    TL_TASKS = 16
+    TL_FILL = 18
+    TL_FINE = 20
+    TL_BEST = 22
+    TL_SORT_COUNT = 24
+    TL_SORT_STARTS = 26
+    TL_SORT_FILL = 28
+    TL_SORT_CELLS = 30
+    TL_UPDATE = 32
+    TL_REVIVE = 34
+    TL_N_TASKS = 36
+    TL_N_COUNTERS = 38
+
+
+# The sizes and the integer arrays shared by the threads of a two-level
+# assignment. The floating arrays are passed next to it: a struct can't have
+# fields of a fused type.
+cdef struct TwoLevel:
+    intp_t n_clusters
+    intp_t n_cells
+    intp_t n_features
+    intp_t max_probes
+    # Squared `ratio`.
+    double ratio2
+    # Number of blocks of rows of the counting sort of the pairs.
+    intp_t n_blocks
+    # Number of centers claimed together.
+    intp_t block_size
+    # (n_clusters,) cell of each center
+    int *cell_of_center
+    # (n_clusters,) centers sorted by cell, then by index
+    intp_t *order
+    # (n_cells + 1,) the centers of the cell c are
+    # order[cell_starts[c]:cell_starts[c + 1]]
+    intp_t *cell_starts
+    # (max_rows, max_probes) cells probed by each row, ended by -1
+    int *probes
+    # (n_blocks, n_cells) pairs of each cell in each block of rows, then where
+    # the block writes its next pair of each cell
+    intp_t *block_counts
+    # (n_cells + 1,) the pairs of the cell c are
+    # pair_slots[pair_starts[c]:pair_starts[c + 1]]
+    intp_t *pair_starts
+    # (max_rows * max_probes,) pairs sorted by cell, as indices in `probes`
+    intp_t *pair_slots
+    # (max_rows, max_probes) nearest center of each pair
+    int *pair_labels
+    # (max_tasks,) cell and first pair of each GEMM task
+    intp_t *task_cells
+    intp_t *task_starts
+    # (n_clusters,) position of each center in `order`
+    intp_t *position
+
+
+cdef bint _two_level_alloc(TwoLevel *tl, intp_t max_rows) noexcept nogil:
+    """Allocate the work arrays of `tl`. Returns whether it succeeded."""
+    cdef:
+        intp_t max_pairs = max_rows * tl.max_probes
+        intp_t max_tasks = max_pairs // PAIR_CHUNK_SIZE + tl.n_cells + 1
+
+    tl.order = <intp_t*> malloc(tl.n_clusters * sizeof(intp_t))
+    tl.cell_starts = <intp_t*> malloc((tl.n_cells + 1) * sizeof(intp_t))
+    tl.probes = <int*> malloc(max_pairs * sizeof(int))
+    tl.block_counts = <intp_t*> malloc(tl.n_blocks * tl.n_cells * sizeof(intp_t))
+    tl.pair_starts = <intp_t*> malloc((tl.n_cells + 1) * sizeof(intp_t))
+    tl.pair_slots = <intp_t*> malloc(max_pairs * sizeof(intp_t))
+    tl.pair_labels = <int*> malloc(max_pairs * sizeof(int))
+    tl.task_cells = <intp_t*> malloc(max_tasks * sizeof(intp_t))
+    tl.task_starts = <intp_t*> malloc(max_tasks * sizeof(intp_t))
+    tl.position = <intp_t*> malloc(tl.n_clusters * sizeof(intp_t))
+    return (
+        tl.order != NULL
+        and tl.cell_starts != NULL
+        and tl.probes != NULL
+        and tl.block_counts != NULL
+        and tl.pair_starts != NULL
+        and tl.pair_slots != NULL
+        and tl.pair_labels != NULL
+        and tl.task_cells != NULL
+        and tl.task_starts != NULL
+        and tl.position != NULL
+    )
+
+
+cdef void _two_level_free(TwoLevel *tl) noexcept nogil:
+    free(tl.order)
+    free(tl.cell_starts)
+    free(tl.probes)
+    free(tl.block_counts)
+    free(tl.pair_starts)
+    free(tl.pair_slots)
+    free(tl.pair_labels)
+    free(tl.task_cells)
+    free(tl.task_starts)
+    free(tl.position)
+
+
+cdef void _two_level_init(
+    TwoLevel *tl,
+    intp_t n_clusters,
+    intp_t n_cells,
+    intp_t n_features,
+    intp_t max_probes,
+    double ratio,
+    int *cell_of_center,
+    int n_threads,
+) noexcept nogil:
+    memset(tl, 0, sizeof(TwoLevel))
+    tl.n_clusters = n_clusters
+    tl.n_cells = n_cells
+    tl.n_features = n_features
+    tl.max_probes = max(1, min(max_probes, n_cells))
+    tl.ratio2 = ratio * ratio
+    tl.n_blocks = n_threads
+    tl.block_size = max(1, n_clusters // (16 * n_threads))
+    tl.cell_of_center = cell_of_center
+
+
+cdef inline floating _squared_norm_unrolled(
+    const floating *x,
+    intp_t n_features,
+) noexcept nogil:
+    """Squared norm with 8 partial sums.
+
+    `_squared_norm` adds the terms one after the other, which the compiler
+    can't vectorize: it takes as long as comparing the row to tens of cells.
+    """
+    cdef:
+        floating[8] partial
+        floating result = 0.0
+        intp_t k, u
+        intp_t n_unrolled = n_features - n_features % 8
+
+    for u in range(8):
+        partial[u] = 0.0
+    for k in range(0, n_unrolled, 8):
+        for u in range(8):
+            partial[u] += x[k + u] * x[k + u]
+    for k in range(n_unrolled, n_features):
+        result += x[k] * x[k]
+    for u in range(8):
+        result += partial[u]
+    return result
+
+
+cdef inline intp_t _two_level_distances_size(TwoLevel *tl) noexcept nogil:
+    """Size of the buffer of distances of a thread."""
+    return max(
+        COARSE_CHUNK_SIZE * tl.n_cells,
+        PAIR_CHUNK_SIZE * min(CELL_BLOCK_SIZE, tl.n_clusters),
+    )
+
+
+def _emeans_steps_two_level(
+    const floating[:, ::1] X,              # IN
+    const intp_t[::1] rows,                # IN
+    intp_t batch_size,
+    floating[:, ::1] centers,              # INOUT
+    double[::1] weight_ema,                # INOUT
+    const double[::1] step_sizes,          # IN
+    double[:, ::1] epoch_sums,             # INOUT, or None
+    double[::1] epoch_counts,              # INOUT, or None
+    intp_t first_step,
+    intp_t revival_period,
+    revive,
+    int n_threads,
+    floating[:, ::1] cells,                # INOUT
+    int[::1] cell_of_center,               # INOUT
+    intp_t max_probes,
+    double ratio,
+):
+    """Consecutive e-means steps on the rows `X[rows]`, two-level assignment.
+
+    Same as `_emeans_steps`, but each row is only compared to the centers of
+    the cells it probes. The result doesn't depend on the number of threads.
+
+    Parameters
+    ----------
+    cells : ndarray of shape (n_cells, n_features), dtype=floating
+        Coarse centers, updated inplace.
+
+    cell_of_center : ndarray of shape (n_clusters,), dtype=int32
+        Cell of each center, updated inplace. `revive` can change it, e.g. to
+        put a center that it moves in the cell of the center it now is next
+        to.
+
+    max_probes : int
+        Maximum number of cells probed by a row.
+
+    ratio : float
+        A cell is probed by a row when its squared distance to the row is at
+        most `ratio**2` times the one of the nearest cell. `inf` to always
+        probe the `max_probes` nearest cells.
+    """
+    cdef:
+        TwoLevel tl
+        intp_t n_rows = rows.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t n_cells = cells.shape[0]
+        intp_t n_steps = step_sizes.shape[0]
+        intp_t max_batch_size = min(batch_size, n_rows)
+        intp_t distances_size
+        intp_t failed = 0
+        intp_t n_ready = 0
+        intp_t n_failed = 0
+        bint allocated
+        list errors = []
+        int *labels
+        intp_t *cluster_starts
+        intp_t *batch_order
+        intp_t *counters
+        floating *X_batch
+        floating *cell_squared_norms
+        floating *sorted_centers
+        floating *sorted_squared_norms
+        floating *pair_distances
+        floating *X_chunk = NULL
+        floating *distances = NULL
+        int *chunk_labels = NULL
+        double *sums = NULL
+
+    if n_rows == 0:
+        return
+
+    _two_level_init(&tl, n_clusters, n_cells, n_features, max_probes, ratio,
+                    &cell_of_center[0], n_threads)
+    distances_size = _two_level_distances_size(&tl)
+
+    labels = <int*> malloc(max_batch_size * sizeof(int))
+    cluster_starts = <intp_t*> malloc((n_clusters + 1) * sizeof(intp_t))
+    batch_order = <intp_t*> malloc(max_batch_size * sizeof(intp_t))
+    counters = <intp_t*> calloc(TL_N_COUNTERS * n_steps, sizeof(intp_t))
+    X_batch = <floating*> malloc(max_batch_size * n_features * sizeof(floating))
+    cell_squared_norms = <floating*> malloc(n_cells * sizeof(floating))
+    sorted_centers = <floating*> malloc(n_clusters * n_features * sizeof(floating))
+    sorted_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+    pair_distances = <floating*> malloc(
+        max_batch_size * tl.max_probes * sizeof(floating)
+    )
+    allocated = _two_level_alloc(&tl, max_batch_size)
+
+    if (
+        not allocated
+        or labels == NULL
+        or cluster_starts == NULL
+        or batch_order == NULL
+        or counters == NULL
+        or X_batch == NULL
+        or cell_squared_norms == NULL
+        or sorted_centers == NULL
+        or sorted_squared_norms == NULL
+        or pair_distances == NULL
+    ):
+        n_failed = 1
+    else:
+        with nogil, parallel(num_threads=n_threads):
+            X_chunk = <floating*> malloc(
+                PAIR_CHUNK_SIZE * n_features * sizeof(floating)
+            )
+            distances = <floating*> malloc(distances_size * sizeof(floating))
+            chunk_labels = <int*> malloc(
+                max(COARSE_CHUNK_SIZE, PAIR_CHUNK_SIZE) * sizeof(int)
+            )
+            sums = <double*> malloc(n_features * sizeof(double))
+
+            if emeans_buffers_ready(
+                &n_ready,
+                &n_failed,
+                X_chunk == NULL
+                or distances == NULL
+                or chunk_labels == NULL
+                or sums == NULL,
+            ):
+                _two_level_steps_worker(
+                    &tl, &X[0, 0], &rows[0], n_rows, batch_size, &centers[0, 0],
+                    &weight_ema[0], &step_sizes[0], n_steps,
+                    NULL if epoch_sums is None else &epoch_sums[0, 0],
+                    NULL if epoch_counts is None else &epoch_counts[0],
+                    first_step, revival_period, <PyObject*> revive,
+                    <PyObject*> errors, &failed, counters, labels,
+                    cluster_starts, batch_order, X_batch, &cells[0, 0],
+                    cell_squared_norms, sorted_centers, sorted_squared_norms,
+                    pair_distances, X_chunk, distances, chunk_labels, sums,
+                )
+
+            free(X_chunk)
+            free(distances)
+            free(chunk_labels)
+            free(sums)
+
+    free(labels)
+    free(cluster_starts)
+    free(batch_order)
+    free(counters)
+    free(X_batch)
+    free(cell_squared_norms)
+    free(sorted_centers)
+    free(sorted_squared_norms)
+    free(pair_distances)
+    _two_level_free(&tl)
+
+    if errors:
+        raise errors[0]
+    if n_failed:
+        raise MemoryError()
+
+
+def _labels_inertia_two_level(
+    const floating[:, ::1] X,        # IN
+    const floating[:, ::1] centers,  # IN
+    const double[::1] weight_ema,    # IN
+    floating[:, ::1] cells,          # INOUT
+    int[::1] cell_of_center,         # INOUT
+    intp_t max_probes,
+    double ratio,
+    int[::1] labels,                 # OUT
+    int n_threads,
+):
+    """Assign each sample to the nearest center of the cells it probes.
+
+    The cells are refreshed first, as before a step of
+    `_emeans_steps_two_level`. Fills `labels` and returns the sum of the
+    squared distances of the samples to the center of their label. The result
+    doesn't depend on the number of threads.
+    """
+    cdef:
+        TwoLevel tl
+        intp_t n_samples = X.shape[0]
+        intp_t n_clusters = centers.shape[0]
+        intp_t n_features = centers.shape[1]
+        intp_t n_cells = cells.shape[0]
+        intp_t n_chunks = (n_samples + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t n_blocks = (n_samples + LABELS_BLOCK_SIZE - 1) // LABELS_BLOCK_SIZE
+        intp_t max_rows = min(n_samples, LABELS_BLOCK_SIZE)
+        intp_t distances_size, chunk_idx
+        intp_t failed = 0
+        intp_t n_ready = 0
+        intp_t n_failed = 0
+        bint allocated
+        list errors = []
+        double inertia = 0.0
+        double *chunk_inertia
+        intp_t *counters
+        floating *cell_squared_norms
+        floating *sorted_centers
+        floating *sorted_squared_norms
+        floating *pair_distances
+        floating *X_chunk = NULL
+        floating *distances = NULL
+        int *chunk_labels = NULL
+        double *sums = NULL
+
+    if n_samples == 0:
+        return 0.0
+
+    n_threads = min(n_threads, n_chunks)
+    _two_level_init(&tl, n_clusters, n_cells, n_features, max_probes, ratio,
+                    &cell_of_center[0], n_threads)
+    distances_size = _two_level_distances_size(&tl)
+
+    chunk_inertia = <double*> malloc(n_chunks * sizeof(double))
+    counters = <intp_t*> calloc(TL_N_COUNTERS * (n_blocks + 1), sizeof(intp_t))
+    cell_squared_norms = <floating*> malloc(n_cells * sizeof(floating))
+    sorted_centers = <floating*> malloc(n_clusters * n_features * sizeof(floating))
+    sorted_squared_norms = <floating*> malloc(n_clusters * sizeof(floating))
+    pair_distances = <floating*> malloc(max_rows * tl.max_probes * sizeof(floating))
+    allocated = _two_level_alloc(&tl, max_rows)
+
+    if (
+        not allocated
+        or chunk_inertia == NULL
+        or counters == NULL
+        or cell_squared_norms == NULL
+        or sorted_centers == NULL
+        or sorted_squared_norms == NULL
+        or pair_distances == NULL
+    ):
+        n_failed = 1
+    else:
+        with nogil:
+            with parallel(num_threads=n_threads):
+                X_chunk = <floating*> malloc(
+                    PAIR_CHUNK_SIZE * n_features * sizeof(floating)
+                )
+                distances = <floating*> malloc(distances_size * sizeof(floating))
+                chunk_labels = <int*> malloc(
+                    max(COARSE_CHUNK_SIZE, PAIR_CHUNK_SIZE) * sizeof(int)
+                )
+                sums = <double*> malloc(n_features * sizeof(double))
+
+                if emeans_buffers_ready(
+                    &n_ready,
+                    &n_failed,
+                    X_chunk == NULL
+                    or distances == NULL
+                    or chunk_labels == NULL
+                    or sums == NULL,
+                ):
+                    _two_level_labels_worker(
+                        &tl, &X[0, 0], n_samples, &centers[0, 0],
+                        &weight_ema[0], <PyObject*> errors, &failed, counters,
+                        &labels[0], chunk_inertia, &cells[0, 0],
+                        cell_squared_norms, sorted_centers,
+                        sorted_squared_norms, pair_distances, X_chunk,
+                        distances, chunk_labels, sums,
+                    )
+
+                free(X_chunk)
+                free(distances)
+                free(chunk_labels)
+                free(sums)
+
+            if not n_failed and not failed:
+                # Sum the inertias of the chunks in a fixed order.
+                for chunk_idx in range(n_chunks):
+                    inertia += chunk_inertia[chunk_idx]
+
+    free(chunk_inertia)
+    free(counters)
+    free(cell_squared_norms)
+    free(sorted_centers)
+    free(sorted_squared_norms)
+    free(pair_distances)
+    _two_level_free(&tl)
+
+    if errors:
+        raise errors[0]
+    if n_failed:
+        raise MemoryError()
+    return inertia
+
+
+cdef void _two_level_steps_worker(
+    TwoLevel *tl,                     # shared
+    const floating *X,
+    const intp_t *rows,
+    intp_t n_rows,
+    intp_t batch_size,
+    floating *centers,
+    double *weight_ema,
+    const double *step_sizes,
+    intp_t n_steps,
+    double *epoch_sums,
+    double *epoch_counts,
+    intp_t first_step,
+    intp_t revival_period,
+    PyObject *revive,
+    PyObject *errors,
+    intp_t *failed,                   # shared: != 0 to stop at the next step
+    intp_t *counters,                 # shared (n_steps, TL_N_COUNTERS)
+    int *labels,                      # shared (batch_size,)
+    intp_t *cluster_starts,           # shared (n_clusters + 1,)
+    intp_t *batch_order,              # shared (batch_size,)
+    floating *X_batch,                # shared (batch_size, n_features)
+    floating *cells,                  # shared (n_cells, n_features)
+    floating *cell_squared_norms,     # shared (n_cells,)
+    floating *sorted_centers,         # shared (n_clusters, n_features)
+    floating *sorted_squared_norms,   # shared (n_clusters,)
+    floating *pair_distances,         # shared (batch_size, max_probes)
+    floating *X_chunk,                # thread-local
+    floating *distances,              # thread-local
+    int *chunk_labels,                # thread-local
+    double *sums,                     # thread-local
+) noexcept nogil:
+    """What each thread of `_emeans_steps_two_level` runs.
+
+    Same phases as `_steps_worker`, with the two-level assignment on a
+    contiguous copy of the batch: its rows are read once per probed cell.
+    """
+    cdef:
+        bint is_main_thread = emeans_omp_thread_num() == 0
+        intp_t n_clusters = tl.n_clusters
+        intp_t n_features = tl.n_features
+        intp_t block_size = tl.block_size
+        intp_t n_cells = tl.n_cells
+        intp_t n_blocks = tl.n_blocks
+        intp_t s, n_batch, n_chunks, chunk_idx, start, n_chunk_rows, r, j, m, c
+        intp_t first, last, block_idx, count
+        const intp_t *batch
+        intp_t *counter
+        intp_t *counts
+
+    for s in range(n_steps):
+        if emeans_load(failed):
+            return
+        if is_main_thread:
+            # Only the main thread of the interpreter handles the signals, as
+            # KeyboardInterrupt.
+            with gil:
+                try:
+                    PyErr_CheckSignals()
+                except BaseException as exc:
+                    (<list> errors).append(exc)
+                    emeans_fetch_add(failed, 1)
+                    return
+
+        batch = rows + s * batch_size
+        n_batch = min(batch_size, n_rows - s * batch_size)
+        n_chunks = (n_batch + CHUNK_SIZE - 1) // CHUNK_SIZE
+        counter = counters + s * TL_N_COUNTERS
+
+        # Copy of the batch rows, by chunks of rows.
+        while True:
+            chunk_idx = emeans_fetch_add(&counter[TL_GATHER], 1)
+            if chunk_idx >= n_chunks:
+                break
+            start = chunk_idx * CHUNK_SIZE
+            n_chunk_rows = min(CHUNK_SIZE, n_batch - start)
+            for r in range(start, start + n_chunk_rows):
+                memcpy(&X_batch[r * n_features], &X[batch[r] * n_features],
+                       n_features * sizeof(floating))
+            emeans_fetch_add(&counter[TL_GATHER + 1], 1)
+        emeans_wait(&counter[TL_GATHER + 1], n_chunks)
+
+        _refresh_cells(
+            tl, counter, centers, weight_ema, cells, cell_squared_norms,
+            sorted_centers, sorted_squared_norms, distances, sums,
+        )
+        _search(
+            tl, counter, X_batch, n_batch, cells, cell_squared_norms,
+            sorted_centers, sorted_squared_norms, pair_distances, labels,
+            <const floating*> NULL, NULL, X_chunk, distances, chunk_labels,
+        )
+
+        # Sort of the batch rows by center, in the order of `tl.order`, then
+        # by row: a counting sort by the cell of their center as for the
+        # pairs, with the same work arrays, then one by center in each cell.
+        # 1. Number of rows of each cell, by blocks of rows.
+        while True:
+            block_idx = emeans_fetch_add(&counter[TL_SORT_COUNT], 1)
+            if block_idx >= n_blocks:
+                break
+            counts = tl.block_counts + block_idx * n_cells
+            memset(counts, 0, n_cells * sizeof(intp_t))
+            for r in range(block_idx * n_batch // n_blocks,
+                           (block_idx + 1) * n_batch // n_blocks):
+                counts[tl.cell_of_center[labels[r]]] += 1
+            emeans_fetch_add(&counter[TL_SORT_COUNT + 1], 1)
+        emeans_wait(&counter[TL_SORT_COUNT + 1], n_blocks)
+
+        # 2. First row of each cell and of each block in it, by the first
+        # thread to get here.
+        if emeans_fetch_add(&counter[TL_SORT_STARTS], 1) == 0:
+            start = 0
+            for c in range(n_cells):
+                tl.pair_starts[c] = start
+                for block_idx in range(n_blocks):
+                    count = tl.block_counts[block_idx * n_cells + c]
+                    tl.block_counts[block_idx * n_cells + c] = start
+                    start += count
+            tl.pair_starts[n_cells] = start
+            cluster_starts[0] = 0
+            emeans_fetch_add(&counter[TL_SORT_STARTS + 1], 1)
+        emeans_wait(&counter[TL_SORT_STARTS + 1], 1)
+
+        # 3. Rows of each cell, by blocks of rows.
+        while True:
+            block_idx = emeans_fetch_add(&counter[TL_SORT_FILL], 1)
+            if block_idx >= n_blocks:
+                break
+            counts = tl.block_counts + block_idx * n_cells
+            for r in range(block_idx * n_batch // n_blocks,
+                           (block_idx + 1) * n_batch // n_blocks):
+                c = tl.cell_of_center[labels[r]]
+                tl.pair_slots[counts[c]] = r
+                counts[c] += 1
+            emeans_fetch_add(&counter[TL_SORT_FILL + 1], 1)
+        emeans_wait(&counter[TL_SORT_FILL + 1], n_blocks)
+
+        # 4. Rows of each center, cell by cell. The rows of the center
+        # tl.order[m] are batch_order[cluster_starts[m]:cluster_starts[m + 1]].
+        while True:
+            c = emeans_fetch_add(&counter[TL_SORT_CELLS], 1)
+            if c >= n_cells:
+                break
+            first = tl.cell_starts[c]
+            last = tl.cell_starts[c + 1]
+            # cluster_starts[m + 1] is the number of rows of the center, then
+            # where its next row goes: it ends at the first row of the next
+            # center.
+            memset(cluster_starts + first + 1, 0, (last - first) * sizeof(intp_t))
+            for r in range(tl.pair_starts[c], tl.pair_starts[c + 1]):
+                cluster_starts[tl.position[labels[tl.pair_slots[r]]] + 1] += 1
+            start = tl.pair_starts[c]
+            for m in range(first, last):
+                count = cluster_starts[m + 1]
+                cluster_starts[m + 1] = start
+                start += count
+            for r in range(tl.pair_starts[c], tl.pair_starts[c + 1]):
+                m = tl.position[labels[tl.pair_slots[r]]]
+                batch_order[cluster_starts[m + 1]] = tl.pair_slots[r]
+                cluster_starts[m + 1] += 1
+            emeans_fetch_add(&counter[TL_SORT_CELLS + 1], 1)
+        emeans_wait(&counter[TL_SORT_CELLS + 1], n_cells)
+
+        # EMA update, by blocks of centers in the order of `tl.order`.
+        while True:
+            first = emeans_fetch_add(&counter[TL_UPDATE], block_size)
+            if first >= n_clusters:
+                break
+            last = min(first + block_size, n_clusters)
+            for m in range(first, last):
+                j = tl.order[m]
+                _update_center(
+                    X_batch, batch_order + cluster_starts[m],
+                    cluster_starts[m + 1] - cluster_starts[m], n_features,
+                    centers + j * n_features, &weight_ema[j], step_sizes[s],
+                    NULL if epoch_sums == NULL
+                    else epoch_sums + j * n_features,
+                    NULL if epoch_counts == NULL else epoch_counts + j,
+                    sums,
+                )
+            emeans_fetch_add(&counter[TL_UPDATE + 1], last - first)
+        emeans_wait(&counter[TL_UPDATE + 1], n_clusters)
+
+        if revival_period > 0 and (first_step + s + 1) % revival_period == 0:
+            # Revival of the dead clusters, by the first thread to get here.
+            if emeans_fetch_add(&counter[TL_REVIVE], 1) == 0:
+                with gil:
+                    try:
+                        (<object> revive)()
+                    except BaseException as exc:
+                        (<list> errors).append(exc)
+                        emeans_fetch_add(failed, 1)
+                emeans_fetch_add(&counter[TL_REVIVE + 1], 1)
+            emeans_wait(&counter[TL_REVIVE + 1], 1)
+
+
+cdef void _two_level_labels_worker(
+    TwoLevel *tl,                     # shared
+    const floating *X,
+    intp_t n_samples,
+    const floating *centers,
+    const double *weight_ema,
+    PyObject *errors,
+    intp_t *failed,                   # shared: != 0 to stop at the next block
+    intp_t *counters,                 # shared (n_blocks + 1, TL_N_COUNTERS)
+    int *labels,                      # shared (n_samples,)
+    double *chunk_inertia,            # shared (n_chunks,)
+    floating *cells,                  # shared (n_cells, n_features)
+    floating *cell_squared_norms,     # shared (n_cells,)
+    floating *sorted_centers,         # shared (n_clusters, n_features)
+    floating *sorted_squared_norms,   # shared (n_clusters,)
+    floating *pair_distances,         # shared (max_rows, max_probes)
+    floating *X_chunk,                # thread-local
+    floating *distances,              # thread-local
+    int *chunk_labels,                # thread-local
+    double *sums,                     # thread-local
+) noexcept nogil:
+    """What each thread of `_labels_inertia_two_level` runs."""
+    cdef:
+        bint is_main_thread = emeans_omp_thread_num() == 0
+        intp_t n_blocks = (n_samples + LABELS_BLOCK_SIZE - 1) // LABELS_BLOCK_SIZE
+        intp_t block_idx, start
+
+    _refresh_cells(
+        tl, counters, centers, weight_ema, cells, cell_squared_norms,
+        sorted_centers, sorted_squared_norms, distances, sums,
+    )
+
+    for block_idx in range(n_blocks):
+        if emeans_load(failed):
+            return
+        if is_main_thread:
+            with gil:
+                try:
+                    PyErr_CheckSignals()
+                except BaseException as exc:
+                    (<list> errors).append(exc)
+                    emeans_fetch_add(failed, 1)
+                    return
+
+        start = block_idx * LABELS_BLOCK_SIZE
+        _search(
+            tl, counters + (block_idx + 1) * TL_N_COUNTERS,
+            X + start * tl.n_features, min(LABELS_BLOCK_SIZE, n_samples - start),
+            cells, cell_squared_norms, sorted_centers, sorted_squared_norms,
+            pair_distances, labels + start, centers,
+            chunk_inertia + start // CHUNK_SIZE, X_chunk, distances,
+            chunk_labels,
+        )
+
+
+cdef void _refresh_cells(
+    TwoLevel *tl,                     # shared
+    intp_t *counter,                  # shared (TL_N_COUNTERS,)
+    const floating *centers,          # IN (n_clusters, n_features)
+    const double *weight_ema,         # IN (n_clusters,)
+    floating *cells,                  # shared (n_cells, n_features)
+    floating *cell_squared_norms,     # shared (n_cells,)
+    floating *sorted_centers,         # shared (n_clusters, n_features)
+    floating *sorted_squared_norms,   # shared (n_clusters,)
+    floating *distances,              # thread-local
+    double *sums,                     # thread-local
+) noexcept nogil:
+    """Make the cells follow the centers. Run by each thread of the team.
+
+    1. Each coarse center moves to the mean of the centers of its cell,
+       weighted by their EMA weights. The one of an empty cell stays.
+    2. Each center goes to the cell of its nearest coarse center.
+
+    Then the centers are copied sorted by cell in `sorted_centers`, so that
+    the ones of a cell are contiguous for the GEMM. The squared norm of an
+    empty cell is set to infinity: no row has it as a nearest cell.
+    """
+    cdef:
+        intp_t n_clusters = tl.n_clusters
+        intp_t n_cells = tl.n_cells
+        intp_t n_features = tl.n_features
+        intp_t block_size = tl.block_size
+        intp_t n_chunks = (
+            (n_clusters + COARSE_CHUNK_SIZE - 1) // COARSE_CHUNK_SIZE
+        )
+        intp_t c, m, j, k, chunk_idx, start, first, last
+        double weight, total
+        const floating *center
+
+    # Centers of each cell, by the first thread to get here. The cells of the
+    # centers can have been changed by the revival since the last sort.
+    if emeans_fetch_add(&counter[TL_CELL_LISTS], 1) == 0:
+        _sort_rows_by_label(tl.cell_of_center, n_clusters, n_cells,
+                            tl.cell_starts, tl.order)
+        emeans_fetch_add(&counter[TL_CELL_LISTS + 1], 1)
+    emeans_wait(&counter[TL_CELL_LISTS + 1], 1)
+
+    # Coarse centers, cell by cell.
+    while True:
+        c = emeans_fetch_add(&counter[TL_CELL_MEANS], 1)
+        if c >= n_cells:
+            break
+        if tl.cell_starts[c + 1] > tl.cell_starts[c]:
+            memset(sums, 0, n_features * sizeof(double))
+            total = 0.0
+            for m in range(tl.cell_starts[c], tl.cell_starts[c + 1]):
+                j = tl.order[m]
+                weight = max(weight_ema[j], MIN_CELL_WEIGHT)
+                total += weight
+                center = centers + j * n_features
+                for k in range(n_features):
+                    sums[k] += weight * center[k]
+            for k in range(n_features):
+                cells[c * n_features + k] = <floating> (sums[k] / total)
+        cell_squared_norms[c] = _squared_norm(cells + c * n_features, n_features)
+        emeans_fetch_add(&counter[TL_CELL_MEANS + 1], 1)
+    emeans_wait(&counter[TL_CELL_MEANS + 1], n_cells)
+
+    # Nearest coarse center of each center, by chunks of centers.
+    while True:
+        chunk_idx = emeans_fetch_add(&counter[TL_CELL_ASSIGN], 1)
+        if chunk_idx >= n_chunks:
+            break
+        start = chunk_idx * COARSE_CHUNK_SIZE
+        _assign_rows(
+            centers + start * n_features,
+            min(COARSE_CHUNK_SIZE, n_clusters - start),
+            cells, cell_squared_norms, n_cells, n_features,
+            tl.cell_of_center + start, distances, NULL,
+        )
+        emeans_fetch_add(&counter[TL_CELL_ASSIGN + 1], 1)
+    emeans_wait(&counter[TL_CELL_ASSIGN + 1], n_chunks)
+
+    # Centers of each cell again, by the first thread to get here.
+    if emeans_fetch_add(&counter[TL_CELL_SORT], 1) == 0:
+        _sort_rows_by_label(tl.cell_of_center, n_clusters, n_cells,
+                            tl.cell_starts, tl.order)
+        for c in range(n_cells):
+            if tl.cell_starts[c + 1] == tl.cell_starts[c]:
+                cell_squared_norms[c] = <floating> INFINITY
+        emeans_fetch_add(&counter[TL_CELL_SORT + 1], 1)
+    emeans_wait(&counter[TL_CELL_SORT + 1], 1)
+
+    # Copy of the centers sorted by cell, by blocks of centers.
+    while True:
+        first = emeans_fetch_add(&counter[TL_CELL_COPY], block_size)
+        if first >= n_clusters:
+            break
+        last = min(first + block_size, n_clusters)
+        for m in range(first, last):
+            tl.position[tl.order[m]] = m
+            memcpy(sorted_centers + m * n_features,
+                   centers + tl.order[m] * n_features,
+                   n_features * sizeof(floating))
+            sorted_squared_norms[m] = _squared_norm(
+                sorted_centers + m * n_features, n_features
+            )
+        emeans_fetch_add(&counter[TL_CELL_COPY + 1], last - first)
+    emeans_wait(&counter[TL_CELL_COPY + 1], n_clusters)
+
+
+cdef void _search(
+    TwoLevel *tl,                               # shared
+    intp_t *counter,                            # shared (TL_N_COUNTERS,)
+    const floating *X_rows,                     # IN (n_rows, n_features)
+    intp_t n_rows,
+    const floating *cells,                      # IN (n_cells, n_features)
+    const floating *cell_squared_norms,         # IN (n_cells,)
+    const floating *sorted_centers,             # IN (n_clusters, n_features)
+    const floating *sorted_squared_norms,       # IN (n_clusters,)
+    floating *pair_distances,                   # shared (n_rows, max_probes)
+    int *labels,                                # OUT (n_rows,)
+    const floating *centers,                    # IN, if chunk_inertia != NULL
+    double *chunk_inertia,                      # OUT (n_chunks,), or NULL
+    floating *X_chunk,                          # thread-local
+    floating *distances,                        # thread-local
+    int *chunk_labels,                          # thread-local
+) noexcept nogil:
+    """Two-level assignment of contiguous rows. Run by each thread of the team.
+
+    `chunk_inertia` gets the sum of the squared distances of the rows of each
+    chunk of CHUNK_SIZE rows to the center of their label.
+    """
+    cdef:
+        intp_t n_cells = tl.n_cells
+        intp_t n_features = tl.n_features
+        intp_t max_probes = tl.max_probes
+        intp_t n_blocks = tl.n_blocks
+        intp_t n_chunks = (n_rows + CHUNK_SIZE - 1) // CHUNK_SIZE
+        intp_t n_coarse_chunks = (
+            (n_rows + COARSE_CHUNK_SIZE - 1) // COARSE_CHUNK_SIZE
+        )
+        intp_t chunk_idx, start, n_chunk_rows, r, i, c, q
+        intp_t n_probes, block_idx, n_pairs, n_tasks, task_idx, count
+        intp_t first, n_members, block_start, n_block, slot
+        int nearest, label
+        int *probes
+        intp_t *counts
+        const floating *row
+        floating squared_norm, nearest_distance, threshold, dist, min_dist
+        floating max_finite
+        double threshold_64, total
+
+    if floating is float:
+        max_finite = FLT_MAX
+    else:
+        max_finite = DBL_MAX
+
+    # Cells probed by each row, by chunks of rows.
+    while True:
+        chunk_idx = emeans_fetch_add(&counter[TL_COARSE], 1)
+        if chunk_idx >= n_coarse_chunks:
+            break
+        start = chunk_idx * COARSE_CHUNK_SIZE
+        n_chunk_rows = min(COARSE_CHUNK_SIZE, n_rows - start)
+        # distances = ||g||² - 2 x.g, and the nearest cell
+        _assign_rows(
+            X_rows + start * n_features, n_chunk_rows, cells,
+            cell_squared_norms, n_cells, n_features, chunk_labels, distances,
+            NULL,
+        )
+        for r in range(n_chunk_rows):
+            i = start + r
+            row = distances + r * n_cells
+            nearest = chunk_labels[r]
+            probes = tl.probes + i * max_probes
+
+            # ||x - g||² <= ratio² ||x - g_nearest||², without the ||x||² of
+            # the left-hand side. The threshold is finite: the distance of an
+            # empty cell is infinite.
+            squared_norm = _squared_norm_unrolled(
+                X_rows + i * n_features, n_features
+            )
+            nearest_distance = squared_norm + row[nearest]
+            if nearest_distance < 0:
+                nearest_distance = 0
+            threshold_64 = tl.ratio2 * nearest_distance - squared_norm
+            if threshold_64 < max_finite:
+                threshold = <floating> threshold_64
+            else:
+                threshold = max_finite
+
+            # The probed cells, kept sorted by distance then by index while
+            # going through the cells: the last one leaves when a nearer one
+            # comes.
+            n_probes = 0
+            for c in range(n_cells):
+                dist = row[c]
+                if dist <= threshold or c == nearest:
+                    if n_probes < max_probes:
+                        q = n_probes
+                        n_probes += 1
+                    elif dist < row[probes[max_probes - 1]]:
+                        q = max_probes - 1
+                    else:
+                        continue
+                    while q > 0 and row[probes[q - 1]] > dist:
+                        probes[q] = probes[q - 1]
+                        q -= 1
+                    probes[q] = <int> c
+            if n_probes < max_probes:
+                probes[n_probes] = -1
+        emeans_fetch_add(&counter[TL_COARSE + 1], 1)
+    emeans_wait(&counter[TL_COARSE + 1], n_coarse_chunks)
+
+    # Counting sort of the (row, cell) pairs by cell, then by row. Its three
+    # phases split the rows in the same blocks.
+    # 1. Number of pairs of each cell, by blocks of rows.
+    while True:
+        block_idx = emeans_fetch_add(&counter[TL_COUNT], 1)
+        if block_idx >= n_blocks:
+            break
+        counts = tl.block_counts + block_idx * n_cells
+        memset(counts, 0, n_cells * sizeof(intp_t))
+        for i in range(block_idx * n_rows // n_blocks,
+                       (block_idx + 1) * n_rows // n_blocks):
+            probes = tl.probes + i * max_probes
+            for q in range(max_probes):
+                if probes[q] < 0:
+                    break
+                counts[probes[q]] += 1
+        emeans_fetch_add(&counter[TL_COUNT + 1], 1)
+    emeans_wait(&counter[TL_COUNT + 1], n_blocks)
+
+    # 2. First pair of each cell and of each block in it, and the GEMM tasks:
+    # chunks of the pairs of a cell. By the first thread to get here.
+    if emeans_fetch_add(&counter[TL_TASKS], 1) == 0:
+        n_pairs = 0
+        n_tasks = 0
+        for c in range(n_cells):
+            tl.pair_starts[c] = n_pairs
+            for block_idx in range(n_blocks):
+                count = tl.block_counts[block_idx * n_cells + c]
+                tl.block_counts[block_idx * n_cells + c] = n_pairs
+                n_pairs += count
+            start = tl.pair_starts[c]
+            while start < n_pairs:
+                tl.task_cells[n_tasks] = c
+                tl.task_starts[n_tasks] = start
+                n_tasks += 1
+                start += PAIR_CHUNK_SIZE
+        tl.pair_starts[n_cells] = n_pairs
+        # The number of tasks is in the counters of the step: a thread that
+        # is late must not read the one of a later step.
+        emeans_fetch_add(&counter[TL_N_TASKS], n_tasks)
+        emeans_fetch_add(&counter[TL_TASKS + 1], 1)
+    emeans_wait(&counter[TL_TASKS + 1], 1)
+    n_tasks = emeans_load(&counter[TL_N_TASKS])
+
+    # 3. Pairs of each cell, by blocks of rows.
+    while True:
+        block_idx = emeans_fetch_add(&counter[TL_FILL], 1)
+        if block_idx >= n_blocks:
+            break
+        counts = tl.block_counts + block_idx * n_cells
+        for i in range(block_idx * n_rows // n_blocks,
+                       (block_idx + 1) * n_rows // n_blocks):
+            probes = tl.probes + i * max_probes
+            for q in range(max_probes):
+                if probes[q] < 0:
+                    break
+                tl.pair_slots[counts[probes[q]]] = i * max_probes + q
+                counts[probes[q]] += 1
+        emeans_fetch_add(&counter[TL_FILL + 1], 1)
+    emeans_wait(&counter[TL_FILL + 1], n_blocks)
+
+    # Nearest center of each pair in its cell, by chunks of pairs of a cell.
+    while True:
+        task_idx = emeans_fetch_add(&counter[TL_FINE], 1)
+        if task_idx >= n_tasks:
+            break
+        c = tl.task_cells[task_idx]
+        start = tl.task_starts[task_idx]
+        n_chunk_rows = min(PAIR_CHUNK_SIZE, tl.pair_starts[c + 1] - start)
+        for r in range(n_chunk_rows):
+            memcpy(X_chunk + r * n_features,
+                   X_rows + (tl.pair_slots[start + r] // max_probes) * n_features,
+                   n_features * sizeof(floating))
+        first = tl.cell_starts[c]
+        n_members = tl.cell_starts[c + 1] - first
+        block_start = 0
+        while block_start < n_members:
+            n_block = min(CELL_BLOCK_SIZE, n_members - block_start)
+            _assign_rows(
+                X_chunk, n_chunk_rows,
+                sorted_centers + (first + block_start) * n_features,
+                sorted_squared_norms + first + block_start, n_block,
+                n_features, chunk_labels, distances, NULL,
+            )
+            for r in range(n_chunk_rows):
+                slot = tl.pair_slots[start + r]
+                dist = distances[r * n_block + chunk_labels[r]]
+                # The centers of a cell are sorted by index: on ties, the
+                # first block has the lowest index.
+                if block_start == 0 or dist < pair_distances[slot]:
+                    pair_distances[slot] = dist
+                    tl.pair_labels[slot] = <int> tl.order[
+                        first + block_start + chunk_labels[r]
+                    ]
+            block_start += CELL_BLOCK_SIZE
+        emeans_fetch_add(&counter[TL_FINE + 1], 1)
+    emeans_wait(&counter[TL_FINE + 1], n_tasks)
+
+    # Nearest center of each row among its pairs, by chunks of rows.
+    while True:
+        chunk_idx = emeans_fetch_add(&counter[TL_BEST], 1)
+        if chunk_idx >= n_chunks:
+            break
+        start = chunk_idx * CHUNK_SIZE
+        total = 0.0
+        for i in range(start, min(start + CHUNK_SIZE, n_rows)):
+            slot = i * max_probes
+            min_dist = pair_distances[slot]
+            label = tl.pair_labels[slot]
+            for q in range(1, max_probes):
+                if tl.probes[slot + q] < 0:
+                    break
+                dist = pair_distances[slot + q]
+                if dist < min_dist or (
+                    dist == min_dist and tl.pair_labels[slot + q] < label
+                ):
+                    min_dist = dist
+                    label = tl.pair_labels[slot + q]
+            labels[i] = label
+            if chunk_inertia != NULL:
+                total += _squared_distance(X_rows + i * n_features,
+                                           centers + label * n_features,
+                                           n_features)
+        if chunk_inertia != NULL:
+            chunk_inertia[chunk_idx] = total
+        emeans_fetch_add(&counter[TL_BEST + 1], 1)
+    emeans_wait(&counter[TL_BEST + 1], n_chunks)

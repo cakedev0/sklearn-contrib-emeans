@@ -33,7 +33,7 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
 
 ## API
 
-`EMeans(n_clusters=8, *, init="random", n_epochs=5, revival=0.1, random_state=None)`
+`EMeans(n_clusters=8, *, init="random", n_epochs=5, revival=0.1, assignment="exact", random_state=None)`
 
 - `n_epochs` can be fractional: the fractional pass comes before the last
   epoch, which is always a full pass.
@@ -55,13 +55,24 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   only when this is estimated to lower the inertia, for a longer fit. It is
   experimental: its algorithm may change from one version to the next, and
   its results with it.
+- `assignment="two-level"` is experimental: its algorithm may change from one
+  version to the next if improvements are found, and its results with it. It
+  makes the fit much faster with many clusters, for an inertia that is
+  typically 0.05% to 0.15% higher. The centers are grouped in
+  `sqrt(n_clusters)` cells that follow them during the fit, and a sample is
+  only compared to the centers of its nearest cells: an epoch costs about
+  `O(n_samples * sqrt(n_clusters))` instead of `O(n_samples * n_clusters)`.
+  It is for dense NumPy inputs, and it is the same as `"exact"` below 1024
+  clusters. `labels_` and `inertia_` then come from the two-level assignment
+  too (`predict` and `score` stay exact).
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.
 - Fitted attributes: `cluster_centers_`, `labels_`, `inertia_` and
   `batch_size_`.
 
 `labels_` and `inertia_` come from an extra assignment pass on the final
-centers, so that `fit(X).labels_` is the same as `predict(X)`.
+centers, so that `fit(X).labels_` is the same as `predict(X)` (but for a few
+samples with `assignment="two-level"`).
 
 The input can be dense or a sparse CSR matrix (other sparse formats are
 converted to CSR), in float32 or float64 (float32 is faster). There is no

@@ -120,6 +120,121 @@ Initialization
 The time of a better initialization can also be spent on more epochs: compare
 both on your data.
 
+.. _many_clusters:
+
+Many clusters
+-------------
+
+With the default `assignment="exact"`, each sample is compared to all the
+centers: an epoch costs `O(n_samples * n_clusters)`. With a given number of
+samples per cluster, the fit time is then quadratic in the number of samples.
+
+`assignment="two-level"` groups the centers in `round(sqrt(n_clusters))`
+cells. A sample is compared to the centers of the cells, then only to the
+centers of its nearest cells, and an epoch costs about
+`O(n_samples * sqrt(n_clusters))`::
+
+    EMeans(n_clusters=10_000, assignment="two-level").fit(X)
+
+The rest of the algorithm is unchanged. The cells follow the centers during the
+fit: before each mini-batch, each cell center moves to the mean of its
+centers, and each center goes to the cell of its nearest cell center. A sample
+probes its nearest cell, and the cells that are at most 1.2 times as far from
+it, up to 16 cells. The pass that computes `labels_` does the same.
+
+Fit times on the first `n_samples` of DEEP 1B (96 features), with 5 epochs, on
+one socket of a Xeon 6787P server (MKL, 86 threads, one per core):
+
+.. list-table::
+   :header-rows: 1
+
+   * - `n_samples`
+     - `n_clusters`
+     - `"exact"`
+     - `"two-level"`
+     - inertia of `labels_`
+   * - 1M
+     - 10,000
+     - 4.3 s
+     - 0.9 s
+     - +0.10%
+   * - 5M
+     - 50,000
+     - 124 s
+     - 4.1 s
+     - +0.12%
+   * - 20M
+     - 20,000
+     - 176 s
+     - 10.6 s
+     - +0.08%
+   * - 100M
+     - 10,000
+     - 385 s
+     - 45 s
+     - +0.11%
+   * - 100M
+     - 1,000,000
+     - not run
+     - 291 s
+     -
+   * - 500M
+     - 500,000
+     - not run
+     - 17 min
+     -
+   * - 500M
+     - 5,000,000
+     - not run
+     - 58 min
+     -
+
+At the rate of the exact fits of this table, the last one would take more than
+a week with `"exact"`.
+
+This is the two-level assignment of o-means [3]_, a variant of e-means for
+NVIDIA GPUs: one e-means on all the centers, where cells that are rebuilt
+during the fit select the centers each sample is compared to. `EMeans` runs it
+on CPUs, with three differences:
+
+- It has `sqrt(n_clusters)` cells, where o-means has cells of about 128
+  centers. Both have 128 cells with 16,384 clusters. With more clusters, the
+  number of cells of o-means grows like `n_clusters`, and so does the cost of
+  comparing each sample to them. o-means was evaluated up to 65,536 clusters.
+- The number of cells probed by a sample depends on the sample, where o-means
+  probes a fixed number of cells (12 to 24). A sample that is clearly nearer
+  to one cell is compared to fewer centers. In the experiments behind this
+  implementation, this halved the loss of inertia of a fixed number of probes
+  on three datasets out of four, for the same number of comparisons.
+- The cells are updated before each mini-batch, and `labels_` comes from a
+  pass on the final centers. o-means rebuilds its cells at each revival during
+  the first epoch, then every half epoch, and returns the labels of the last
+  epoch, during which the centers still move.
+
+We have not compared the two on the same hardware. On a GPU, use o-means:
+`assignment="two-level"` does not support array API inputs.
+
+What to know before using it:
+
+- The inertia is typically 0.05% to 0.15% higher than with `"exact"`, on
+  embedding datasets with 100 to 10,000 samples per cluster.
+- `labels_` and `inertia_` come from a two-level assignment too: a fraction of
+  a percent of the samples don't get their closest center, and `inertia_` is
+  the inertia of these labels. `predict` and `score` stay exact, in
+  `O(n_samples * n_clusters)`.
+- Below 1024 clusters it is not faster, and `"two-level"` is the same as
+  `"exact"`.
+- It only supports dense NumPy inputs: sparse and array API inputs raise an
+  error.
+- `init="k-means||"`, `init="k-means++"` and `revival="greedy"` still compare
+  samples to all the centers. With many clusters they take most of the fit
+  time: prefer `init="random"`.
+- The fit needs more memory than with `"exact"`: a copy of each mini-batch
+  (`batch_size_` samples), about 400 bytes per sample of the mini-batch for
+  the cells it probes, and a copy of the centers.
+- It is experimental: its algorithm may change from one version to the next,
+  and its results with it.
+
 Input data
 ----------
 
@@ -197,3 +312,6 @@ References
 .. [2] B. Bahmani, B. Moseley, A. Vattani, R. Kumar and S. Vassilvitskii,
    "Scalable K-Means++", Proceedings of the VLDB Endowment, 2012.
    `arXiv:1203.6402 <https://arxiv.org/abs/1203.6402>`_
+
+.. [3] "o-means: e-means with a two-level assignment", `pull request 5917 of
+   faiss <https://github.com/facebookresearch/faiss/pull/5917>`_, 2026.

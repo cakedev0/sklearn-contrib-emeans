@@ -44,13 +44,19 @@ from sklearn_emeans._kmeans_parallel import (
 CSR_CONTAINERS = [sp.csr_matrix, sp.csr_array]
 
 
-def _reference_step(X, batch_indices, centers, weight_ema, step_size, epoch_stats):
-    """NumPy implementation of one e-means step, updating its inputs inplace."""
+def _reference_step(
+    X, batch_indices, centers, weight_ema, step_size, epoch_stats, labels=None
+):
+    """NumPy implementation of one e-means step, updating its inputs inplace.
+
+    `labels` are the centers of the batch rows, their nearest ones if None.
+    """
     X_batch = X[batch_indices]
     if sp.issparse(X_batch):
         X_batch = X_batch.toarray()
-    distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-    labels = distances.argmin(axis=1)
+    if labels is None:
+        distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        labels = distances.argmin(axis=1)
 
     for j in range(centers.shape[0]):
         mask = labels == j

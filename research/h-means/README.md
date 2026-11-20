@@ -202,12 +202,80 @@ epochs. DEEP, 100 samples per cluster:
    - The prototype reaches about a third of the arithmetic rate of the flat
      GEMM, so a tuned kernel has room left.
 
+## Initialization in `O(n sqrt(k))`
+
+Question: is there an init better than random that does not cost `O(n k)`?
+Short answer: allocating the initial centers to coarse groups in proportion
+to the inertia of the groups gains 0.3% on CLIP for one coarse pass, and
+nothing elsewhere. One more epoch is worth more than any init on the other
+datasets.
+
+All the inits below start with one epoch of e-means into `g = sqrt(k)` coarse
+groups (`O(n sqrt(k))`), except `random`, `sub-10` and `k-means||`.
+
+| name | init |
+|---|---|
+| `stratified` | Random samples inside each group, `k_j` proportional to the size of the group. |
+| `stratified-inertia` | Same, with `k_j` proportional to the inertia of the group around its mean. |
+| `kpp-t4` | k-means++ inside each group on 16 candidates per center, best of 4 draws per step. |
+| `kpp-inertia` | k-means++ inside each group (one draw per step), `k_j` proportional to the inertia. |
+| `h2` | One epoch of the frozen two-level e-means. |
+| `sub-10` | Two epochs of the two-level e-means on a 10% subsample. |
+| `k-means||` | The `O(n k)` init of `EMeans`, as a yardstick (exact fit only). |
+
+Inertia of the labels after 5 epochs of the adaptive two-level fit, against
+the random init. Mean over 3 seeds for the 1M sets, 2 for DEEP 10M at
+`k=10k`, 1 at `k=100k`. The seed noise is about 0.05%. The `k-means||` row
+is with the exact `EMeans`, against random with the exact `EMeans`.
+
+| init | SIFT 10k | GloVe 10k | DEEP 10M 10k | DEEP 10M 100k | CLIP 10k | CLIP 1k |
+|---|---|---|---|---|---|---|
+| `stratified` | -0.01% | -0.02% | -0.01% | -0.03% | -0.03% | -0.16% |
+| `stratified-inertia` | -0.02% | 0.00% | -0.02% | -0.07% | -0.28% | -0.34% |
+| `kpp-t4` | -0.04% | -0.03% | -0.03% | -0.11% | -0.29% | -0.22% |
+| `kpp-inertia` | -0.01% | 0.00% | -0.01% | -0.12% | -0.36% | -0.23% |
+| `h2` | -0.14% | -0.05% | -0.04% | -0.15% | -0.20% | -0.22% |
+| `sub-10` | -0.04% | -0.05% | -0.07% | -0.05% | -0.16% | -0.32% |
+| `k-means||` | -0.03% | -0.04% | -0.06% | | -0.53% | -0.41% |
+
+Random init with more epochs, against 5 epochs:
+
+| epochs | SIFT 10k | GloVe 10k | DEEP 10M 10k | DEEP 10M 100k | CLIP 10k | CLIP 1k |
+|---|---|---|---|---|---|---|
+| 1 | +3.25% | +3.26% | +0.99% | +3.11% | +4.07% | +1.00% |
+| 2 | +1.11% | +0.76% | +0.33% | +1.07% | +1.04% | +0.26% |
+| 6 | -0.05% | -0.12% | -0.03% | -0.19% | +0.03% | -0.03% |
+| 8 | -0.29% | -0.26% | +0.06% | -0.41% | -0.21% | -0.11% |
+| 10 | -0.44% | -0.36% | +0.01% | -0.53% | -0.39% | +0.07% |
+
+- There is little to gain to start with: `k-means||` is within the noise of
+  random on SIFT, GloVe and DEEP. Only CLIP gains (0.4% to 0.5%), for about
+  twice the fit time.
+- On CLIP, the allocation is what matters: `stratified-inertia` gets about as
+  much as k-means++ inside the groups, and 55% to 80% of the gain of
+  `k-means||`. On CLIP at `k=1000`, more epochs do not give this gain.
+- On the other datasets, one or two more epochs beat every init.
+- A good init helps most with few epochs (`h2` and `sub-10` with 1 epoch:
+  +2.2% and +2.4% on GloVe against +3.3% for random), but it does not replace
+  an epoch: no init with 2 epochs reaches random with 5.
+- Cost. `stratified` takes 0.2 s on the 1M sets and 1.3 s on DEEP 10M (fits:
+  1.2 s to 2.5 s and 10 s). `stratified-inertia` needs in addition the sum
+  and the sum of squares of each group, which the coarse pass can accumulate.
+  The prototype computes them in a separate float64 pass that is much slower
+  (1 s to 8 s), so its timing says nothing. `sub-10` takes 0.3 s to 1.2 s
+  (2.4 s at `k=100k`). The k-means++ variants and `h2` take longer than the
+  fit in the prototype (up to 52 s at `k=100k`).
+
+`init_exp.py` runs the study, `init_show.py` prints the tables from
+`results/xeon/init/*.jsonl`. The commands are in `scripts/xeon_v6_init.sh`
+and `scripts/xeon_v6_init2.sh`. The other socket was busy during these runs:
+the timings are indicative.
+
 ## Limits
 
 - One seed per configuration, one machine per device type.
 - All the datasets are dense embeddings with 96 to 512 dimensions.
-- Random init only. k-means|| would cost `O(n k)` again unless it is also
-  made two-level.
+- The init study covers the same four datasets, with 1 to 3 seeds.
 - `g = sqrt(k)` and the probing parameters were tuned by hand on these
   datasets.
 

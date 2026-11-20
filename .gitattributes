@@ -1,1 +1,3 @@
 research/ export-ignore
+# Raw outputs of the experiments: collapsed in the diffs on GitHub.
+research/**/results/** linguist-generated

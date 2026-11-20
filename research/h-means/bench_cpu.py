@@ -147,16 +147,22 @@ PHASES = {}
 def time_phases():
     """Add the wall time of the calls that `fit` makes to `PHASES`.
 
-    What is left of the fit time is the sequential Python code.
+    What is left of the fit time is the sequential Python code. Only the
+    outermost call counts: `_init_cells` fits an `EMeans` on the centers.
     """
+    depth = 0
 
     def timed(name, function):
         def wrapper(*args, **kwargs):
+            nonlocal depth
+            depth += 1
             tic = time.perf_counter()
             try:
                 return function(*args, **kwargs)
             finally:
-                PHASES[name] = PHASES.get(name, 0) + time.perf_counter() - tic
+                depth -= 1
+                if depth == 0:
+                    PHASES[name] = PHASES.get(name, 0) + time.perf_counter() - tic
 
         return wrapper
 

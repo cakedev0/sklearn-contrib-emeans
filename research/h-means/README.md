@@ -430,7 +430,8 @@ Quick probes on 100M samples, 10k clusters, one fit each
   of the best time. In the baseline: 73 s for the 5 permutations of 500M rows
   (14.6 s each), 11 s for the check of the input by scikit-learn, which is
   one `np.sum(X)`, and 8.6 s for the random init, a weighted `choice` that
-  costs `O(n_samples)`.
+  costs `O(n_samples)`. The first two are about twice and 6 times faster
+  since #24: see the next section.
 - The inertia is the same to all digits in all the runs of each table, with
   the three BLAS and all the numbers of threads.
 
@@ -444,6 +445,86 @@ benchlock --tag "h-means threads probe" all -- \
 DATA=deep500M K=50000 FLAGS=--in-memory REPEAT=2 OUT=res/threads_500m.jsonl \
     benchlock --tag "h-means threads 500M" all -- \
     ./xeon_cpu_threads_probe.sh threads_500m.txt
+```
+
+### Grid of the number of samples and of the cluster size
+
+Fit times of `EMeans(assignment="two-level")` on the first `n` samples of
+DEEP 1B, with 100k, 10k, 1k and 100 samples per cluster
+(`results/xeon/cpu_grid_mkl86.jsonl`). One socket of the Xeon 6787P server,
+MKL, 86 threads pinned one per core (`OMP_PROC_BIND=close OMP_PLACES=cores`),
+5 epochs, random init, one seed. Seconds, the median of 3 fits up to 20M
+samples, one fit from 100M. The package has the parallel check of the input
+and the faster permutations (#24), which the runs of the sections above
+don't have.
+
+| n | 100k per cluster | 10k per cluster | 1k per cluster | 100 per cluster |
+|---|---|---|---|---|
+| 1M | 0.56 * | 0.46 * | 0.56 * | 0.90 |
+| 5M | 1.07 * | 1.35 * | 2.34 | 4.08 |
+| 20M | 3.55 * | 6.52 | 10.6 | 26.8 |
+| 100M | 33.4 * | 44.6 | 95.5 | 291 |
+| 500M | 203 | 357 | 1008 | 3478 |
+
+\* Fewer than 1024 clusters: `"two-level"` is the exact assignment.
+
+Against `EMeans` exact, which ran where `n_samples * n_clusters` is at most
+1e12 (one fit). The loss is the inertia against exact, on 1M random samples
+(200k above 20k clusters):
+
+| n | k | exact | two-level | speed-up | loss (centers) | loss (labels) |
+|---|---|---|---|---|---|---|
+| 1M | 10k | 4.27 | 0.90 | 4.7x | +0.06% | +0.10% |
+| 5M | 5k | 7.18 | 2.34 | 3.1x | +0.05% | +0.09% |
+| 5M | 50k | 124 | 4.08 | 30x | +0.08% | +0.12% |
+| 20M | 2k | 10.8 | 6.52 | 1.7x | +0.01% | +0.05% |
+| 20M | 20k | 176 | 10.6 | 17x | +0.03% | +0.08% |
+| 100M | 10k | 385 | 44.6 | 8.6x | +0.05% | +0.11% |
+
+- **500M samples in 5M clusters take 58 minutes.** The exact fits of the
+  table cost 270 to 500 s per 1e12 pairs of a sample and a center. At that
+  rate, the exact fit of this case would take 8 to 14 days.
+- **The time grows like `n^1.5` with many clusters**, as expected from
+  `n sqrt(k)` comparisons. From 100M to 500M samples, the exponent is 1.54
+  at 100 samples per cluster, 1.46 at 1k and 1.29 at 10k.
+- **The larger runs have no exact reference.** Their labels can still be
+  compared to the exact assignment to their own centers, on the same
+  evaluation samples: 98.95% to 99.3% of the samples get their closest center
+  (99.3% to 99.5% in the runs with a reference), and the inertia of the
+  labels is 0.05% to 0.10% above the exact inertia of the centers (0.04% to
+  0.06% in the runs with a reference).
+- **The sequential code takes 50 to 66 s at 500M samples**: 40 s for the 5
+  permutations, 8 to 15 s for the random init and 1.8 s for the check of the
+  input. This is a quarter of the fit with 5k clusters and 2% with 5M. With
+  50k clusters, the fit takes 357 s against 409 s before #24 in the same
+  setup (first table of the previous section): the sequential code went from
+  105 s to 52 s.
+- **Memory at 500M samples**: the data is 179 GiB. The peak memory of the
+  process was 193 GiB with 5k clusters and 205 GiB with 500k clusters, where
+  the copy of a batch of 33.5M samples is 12 GiB. With 5M clusters it was at
+  most 223 GiB: this peak also covers the evaluation of the run before it.
+  All of it stayed on the second socket (4 NUMA nodes of 64 GB).
+- An earlier run of the rows up to 100M, with the wheels (OpenBLAS, 64
+  threads) and before #24, is in `results/xeon/cpu_grid.jsonl`. This setup is
+  1.2x to 1.5x faster on its two-level fits from 5M samples.
+
+`deep500M.f32` is the first 500M vectors of `base.1B.fbin` of DEEP 1B
+(192 GB of raw float32, without the header of 8 bytes): the vectors of
+`deep100M.fbin`, then the next 400M, downloaded by HTTP ranges. The run on
+500M samples needs the `all` slot. It reads the data in anonymous memory
+after dropping the page cache of the other datasets, binds the threads to the
+second socket, and only takes memory from the first one when the second is
+full. The exact evaluation needs `256 * n_clusters` distances per thread
+(5 GB with 5M clusters), so `bench_cpu.py` runs it on fewer threads to stay
+under 80 GB.
+
+Commands, in `~/work/hmeans-cpu` on the server:
+
+```
+export ENV_BIN=$PWD/mkl/.pixi/envs/default/bin THREADS=86 \
+    OMP_PROC_BIND=close OMP_PLACES=cores OUT=res/grid_mkl86.jsonl
+benchlock --tag "h-means cpu grid" s1 -- ./xeon_cpu_grid.sh 1 5 20 100
+benchlock --tag "h-means cpu grid 500M" all -- ./xeon_cpu_grid.sh 500
 ```
 
 ### Semantics, for another backend
@@ -509,6 +590,9 @@ assignment.
   `assume_finite`. `cpu_threads_probe` and `cpu_threads_500m` are the runs
   with more threads, other BLAS and two sockets
   (`scripts/xeon_cpu_threads_probe.sh`, with the lists of runs next to it).
+  `cpu_grid_mkl86` is the grid of the number of samples and of the cluster
+  size (`scripts/xeon_cpu_grid.sh`), and `cpu_grid` an earlier run of it with
+  the wheels and 64 threads.
 - `results/all_runs.csv`, `results/scaling.csv`: written by `summarize.py`.
 - `show.py`, `show_om.py`: print tables from JSON lines.
 - `prof.py`, `prof_cpu.py`: profiling helpers.

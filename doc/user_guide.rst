@@ -140,41 +140,60 @@ centers, and each center goes to the cell of its nearest cell center. A sample
 probes its nearest cell, and the cells that are at most 1.2 times as far from
 it, up to 16 cells. The pass that computes `labels_` does the same.
 
-On one socket of a Xeon 6787P server with 64 threads, with 5 epochs:
+Fit times on the first `n_samples` of DEEP 1B (96 features), with 5 epochs, on
+one socket of a Xeon 6787P server (MKL, 86 threads, one per core):
 
 .. list-table::
    :header-rows: 1
 
-   * - data
+   * - `n_samples`
      - `n_clusters`
      - `"exact"`
      - `"two-level"`
      - inertia of `labels_`
-   * - SIFT (1M samples, 128 features)
+   * - 1M
      - 10,000
-     - 4.8 s
-     - 1.1 s
-     - +0.09%
-   * - Wolt CLIP (1M samples, 512 features)
-     - 10,000
-     - 11.1 s
-     - 2.6 s
-     - +0.14%
-   * - DEEP (10M samples, 96 features)
-     - 10,000
-     - 40 s
-     - 6.3 s
+     - 4.3 s
+     - 0.9 s
      - +0.10%
-   * - DEEP (10M samples, 96 features)
-     - 100,000
-     - 485 s
-     - 13.1 s
+   * - 5M
+     - 50,000
+     - 124 s
+     - 4.1 s
+     - +0.12%
+   * - 20M
+     - 20,000
+     - 176 s
+     - 10.6 s
+     - +0.08%
+   * - 100M
+     - 10,000
+     - 385 s
+     - 45 s
      - +0.11%
+   * - 100M
+     - 1,000,000
+     - not run
+     - 291 s
+     -
+   * - 500M
+     - 500,000
+     - not run
+     - 17 min
+     -
+   * - 500M
+     - 5,000,000
+     - not run
+     - 58 min
+     -
+
+At the rate of the exact fits of this table, the last one would take more than
+a week with `"exact"`.
 
 What to know before using it:
 
 - The inertia is typically 0.05% to 0.15% higher than with `"exact"`, on
-  embedding datasets with 100 to 1,000 samples per cluster.
+  embedding datasets with 100 to 10,000 samples per cluster.
 - `labels_` and `inertia_` come from a two-level assignment too: a fraction of
   a percent of the samples don't get their closest center, and `inertia_` is
   the inertia of these labels. `predict` and `score` stay exact, in

@@ -23,7 +23,7 @@ def main():
                     continue
                 method = r["method"]
                 if method == "ivf":
-                    method = "prototype"
+                    method = f"prototype (ratio {r['ratio']})"
                 elif r.get("tag"):
                     method += f" ({r['tag']})"
                 runs[(r["data"], r["n"], r["k"], method)].append(r)

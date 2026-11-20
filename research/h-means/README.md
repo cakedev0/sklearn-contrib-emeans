@@ -207,12 +207,13 @@ epochs. DEEP, 100 samples per cluster:
 ## CPU implementation in `EMeans`
 
 `EMeans(assignment="two-level")` is the `ivf` method with adaptive probing
-(`p=16, ratio=1.15`), in Cython, for dense NumPy input. Differences with the
+(`p=16, ratio=1.2`), in Cython, for dense NumPy input. Differences with the
 prototype:
 
 - The whole step loop is in `_kernels.pyx`, in one parallel region, as for the
   exact assignment. The result does not depend on the number of threads.
-- The labelling pass uses a ratio of 1.3 in place of 1.15 (see below).
+- The ratio is 1.2 in place of 1.15, in the steps and in the labelling pass
+  (see "The ratio" below).
 - Below 1024 clusters, `"two-level"` is the exact assignment.
 - Ties go to the lowest center index, as with the exact assignment. When all
   the cells are probed, the result is the one of the exact assignment up to
@@ -350,8 +351,8 @@ the coarse search 15%.
    the cells.
 3. A sample probes its nearest cell among the cells that have centers, and
    the cells with `d <= ratio**2 * d_nearest`, `d` being the squared
-   distance, limited to the 16 nearest cells. `ratio` is 1.15 in the steps
-   and 1.3 in the labelling pass.
+   distance, limited to the 16 nearest cells. `ratio` is 1.2, in the steps
+   and in the labelling pass.
 4. The sample goes to the nearest center of the cells it probes. Ties go to
    the lowest index, for the cells and for the centers.
 5. After a revival, a revived center takes the cell of its donor

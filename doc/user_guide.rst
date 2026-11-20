@@ -137,7 +137,7 @@ centers of its nearest cells, and an epoch costs about
 The rest of the algorithm is unchanged. The cells follow the centers during the
 fit: before each mini-batch, each cell center moves to the mean of its
 centers, and each center goes to the cell of its nearest cell center. A sample
-probes its nearest cell, and the cells that are at most 1.15 times as far from
+probes its nearest cell, and the cells that are at most 1.2 times as far from
 it, up to 16 cells.
 
 On one socket of a Xeon 6787P server with 64 threads, with 5 epochs:

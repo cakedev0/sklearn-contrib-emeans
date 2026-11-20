@@ -72,7 +72,6 @@ def main():
     parser.add_argument("--max-probes", type=int)
     parser.add_argument("--ratio", type=float)
     parser.add_argument("--min-clusters", type=int)
-    parser.add_argument("--labels-ratio", type=float)
     parser.add_argument(
         "--assume-finite",
         action="store_true",
@@ -88,8 +87,6 @@ def main():
         _emeans._TWO_LEVEL_RATIO = args.ratio
     if args.min_clusters is not None:
         _emeans._TWO_LEVEL_MIN_CLUSTERS = args.min_clusters
-    if args.labels_ratio is not None:
-        _emeans._TWO_LEVEL_LABELS_RATIO = args.labels_ratio
 
     X = load(args.data, args.n)
     n_samples = X.shape[0]
@@ -127,7 +124,6 @@ def main():
                     "tag": args.tag,
                     "max_probes": _emeans._TWO_LEVEL_MAX_PROBES,
                     "ratio": _emeans._TWO_LEVEL_RATIO,
-                    "labels_ratio": _emeans._TWO_LEVEL_LABELS_RATIO,
                     "threads": n_threads,
                     "slot": os.environ.get("BENCHLOCK_SLOT"),
                     "assume_finite": args.assume_finite,

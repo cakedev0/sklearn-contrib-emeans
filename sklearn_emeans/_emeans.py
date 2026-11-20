@@ -81,12 +81,9 @@ _STEP_LAW = (0.8244, -0.4617, 0.9003, -0.4498, -0.1057)
 # Two-level assignment (`assignment="two-level"`). A sample probes at most
 # `_TWO_LEVEL_MAX_PROBES` cells: its nearest one, and the ones whose distance
 # to the sample is at most `_TWO_LEVEL_RATIO` times the distance of the nearest
-# one. The pass that computes `labels_` has its own ratio: more probes there
-# lower the inertia of the labels for a fraction of the cost of more probes in
-# all the steps.
+# one, in the steps and in the pass that computes `labels_`.
 _TWO_LEVEL_MAX_PROBES = 16
-_TWO_LEVEL_RATIO = 1.15
-_TWO_LEVEL_LABELS_RATIO = 1.3
+_TWO_LEVEL_RATIO = 1.2
 
 # Number of epochs of the e-means of the initial centers that gives the
 # initial cells.
@@ -508,11 +505,10 @@ class EMeans(
     cell center moves to the weighted mean of the centers of its cell, then
     each center goes to the cell of the nearest cell center. A sample probes
     its nearest cell, and the cells whose distance to the sample is at most
-    1.15 times the distance of the nearest one, limited to the 16 nearest
+    1.2 times the distance of the nearest one, limited to the 16 nearest
     cells. It is assigned to the nearest center of the cells it probes.
-    `labels_` and `inertia_` come from a last pass with the same assignment
-    and a ratio of 1.3, so a few samples have a label that is not their
-    closest center: use
+    `labels_` and `inertia_` come from a last pass with the same assignment,
+    so a few samples have a label that is not their closest center: use
     `predict` for the exact labels, and `score` for the exact inertia, both
     in `O(n_samples * n_clusters)`. The initializations 'k-means++' and
     'k-means||' and `revival='greedy'` are not two-level: they keep their
@@ -872,7 +868,7 @@ class EMeans(
                     cells,
                     cell_of_center,
                     _TWO_LEVEL_MAX_PROBES,
-                    _TWO_LEVEL_LABELS_RATIO,
+                    _TWO_LEVEL_RATIO,
                     self.labels_,
                     max_n_threads,
                 )

@@ -12,6 +12,7 @@ from numbers import Integral, Real
 import numpy as np
 import scipy.sparse as sp
 from joblib import cpu_count
+from sklearn import get_config
 from sklearn.base import (
     BaseEstimator,
     ClassNamePrefixFeaturesOutMixin,
@@ -27,12 +28,14 @@ from threadpoolctl import ThreadpoolController
 from sklearn_emeans import _array_api
 from sklearn_emeans._greedy_revival import GreedyRevival, greedy_sample_indices
 from sklearn_emeans._kernels import (
+    _all_finite,
     _chunk_size,
     _emeans_steps,
     _emeans_steps_sparse,
     _labels_inertia,
     _labels_inertia_sparse,
     _omp_max_threads,
+    _shuffle,
 )
 from sklearn_emeans._kmeans_parallel import _kmeans_parallel
 from sklearn_emeans._kmeans_plusplus import _kmeans_plusplus
@@ -145,6 +148,44 @@ def _openmp_effective_n_threads(blas=True):
         if openblas_max_threads:
             n_threads = min(n_threads, openblas_max_threads)
     return n_threads
+
+
+def _validate_data(estimator, X, reset=True):
+    """`validate_data` for the NumPy and SciPy inputs of `EMeans`.
+
+    scikit-learn checks that a dense X is finite with a sum on one thread,
+    which takes 11 s for 500M samples with 96 features. The check is done in
+    parallel here, and the one of scikit-learn only runs to raise its error.
+    """
+    kwargs = dict(
+        accept_sparse="csr",
+        dtype=[np.float64, np.float32],
+        order="C",
+        accept_large_sparse=False,
+        reset=reset,
+    )
+    if sp.issparse(X) or get_config()["assume_finite"]:
+        return validate_data(estimator, X, **kwargs)
+    X_valid = validate_data(estimator, X, ensure_all_finite=False, **kwargs)
+    if not _all_finite(X_valid, _openmp_effective_n_threads(blas=False)):
+        validate_data(estimator, X, **kwargs)
+    return X_valid
+
+
+def _permutation(random_state, n_samples):
+    """`random_state.permutation(n_samples)`, with the dtype intp.
+
+    Same permutation and same state of `random_state` after the call, about
+    twice as fast with 100M samples or more: see `_shuffle`.
+    """
+    bit_generator = getattr(random_state, "_bit_generator", None)
+    if type(random_state) is np.random.RandomState and bit_generator is not None:
+        permutation = np.arange(n_samples, dtype=np.intp)
+        with bit_generator.lock:
+            if _shuffle(bit_generator.capsule, permutation):
+                return permutation
+    # RandomState gives C longs, which are 32-bit on Windows with NumPy 1.
+    return random_state.permutation(n_samples).astype(np.intp, copy=False)
 
 
 def _labels_inertia_threadpool_limit(X, centers, n_threads):
@@ -640,14 +681,7 @@ class EMeans(
         xp = _array_api.get_namespace(X)
         if xp is not None:
             return self._fit_array_api(xp, X)
-        X = validate_data(
-            self,
-            X,
-            accept_sparse="csr",
-            dtype=[np.float64, np.float32],
-            order="C",
-            accept_large_sparse=False,
-        )
+        X = _validate_data(self, X)
         n_samples, n_features = X.shape
         n_clusters = self.n_clusters
         if n_samples < n_clusters:
@@ -696,11 +730,7 @@ class EMeans(
         with _threadpool_controller().limit(limits=1, user_api="blas"):
             for epoch, n_rows in enumerate(epochs_n_rows):
                 is_last_epoch = epoch == len(epochs_n_rows) - 1
-                # intp for the kernel: RandomState gives C longs, which are
-                # 32-bit on Windows.
-                permutation = random_state.permutation(n_samples).astype(
-                    np.intp, copy=False
-                )
+                permutation = _permutation(random_state, n_samples)
                 n_epoch_steps = math.ceil(n_rows / batch_size)
                 step_sizes = np.array(
                     [
@@ -861,7 +891,7 @@ class EMeans(
                     (n_clusters, n_features), dtype=acc_dtype, device=device
                 )
                 epoch_counts = xp.zeros(n_clusters, dtype=acc_dtype, device=device)
-            permutation = random_state.permutation(n_samples)[:n_rows]
+            permutation = _permutation(random_state, n_samples)[:n_rows]
             n_epoch_steps = math.ceil(n_rows / batch_size)
             step_sizes = [
                 _scheduled_step_size(initial_step_size, step + i, n_steps)
@@ -920,15 +950,7 @@ class EMeans(
                 xp,
                 xp.asarray(centers, dtype=X.dtype, device=_array_api.device(X)),
             )
-        X = validate_data(
-            self,
-            X,
-            accept_sparse="csr",
-            dtype=[np.float64, np.float32],
-            order="C",
-            accept_large_sparse=False,
-            reset=False,
-        )
+        X = _validate_data(self, X, reset=False)
         if not isinstance(centers, np.ndarray):
             # Fitted on an array API input.
             centers = _array_api.to_numpy(

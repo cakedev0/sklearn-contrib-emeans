@@ -147,8 +147,7 @@ PHASES = {}
 def time_phases():
     """Add the wall time of the calls that `fit` makes to `PHASES`.
 
-    What is left of the fit time is the sequential Python code, mostly the
-    permutation of each epoch.
+    What is left of the fit time is the sequential Python code.
     """
 
     def timed(name, function):
@@ -162,7 +161,8 @@ def time_phases():
         return wrapper
 
     for name, attribute in [
-        ("validate", "validate_data"),
+        ("validate", "_validate_data"),
+        ("permutations", "_permutation"),
         ("init_cells", "_init_cells"),
         ("steps", "_emeans_steps"),
         ("steps", "_emeans_steps_two_level"),

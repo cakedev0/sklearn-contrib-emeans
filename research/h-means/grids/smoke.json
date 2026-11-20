@@ -1,0 +1,8 @@
+[{"method":"emeans","k":1000},
+ {"method":"flat","k":1000},
+ {"method":"h2","k":1000},
+ {"method":"ivf","k":1000,"p":4,"diag":true},
+ {"method":"ivf","k":1000,"p":4,"init":"h2"},
+ {"method":"graph","k":1000,"m":32,"diag":true},
+ {"method":"graph","k":1000,"m":32,"init":"h2"},
+ {"method":"graph","k":1000,"m":32,"exact_graph":true}]

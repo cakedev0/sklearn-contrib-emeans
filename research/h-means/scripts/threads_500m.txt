@@ -1,0 +1,5 @@
+pypi 64 one
+mkl 86 one OMP_PROC_BIND=close OMP_PLACES=cores
+mkl 172 one OMP_PROC_BIND=close OMP_PLACES=threads
+cf 128 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+mkl 172 two-data OMP_PROC_BIND=spread OMP_PLACES=cores

@@ -1,0 +1,38 @@
+pypi 64 one
+pypi 32 one
+cf 64 one
+cf 86 one
+cfl 64 one
+cfl 86 one
+mkl 64 one
+mkl 86 one
+mkl 172 one
+cf 128 two
+cfl 128 two
+mkl 128 two
+mkl 172 two
+mkl 344 two
+pypi 64 one
+mkl 172 two-data
+mkl 128 two-data
+cf 128 two-data
+mkl 344 two-data
+mkl 172 two-local
+mkl 172 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+mkl 172 two-data OMP_PROC_BIND=close OMP_PLACES=cores
+mkl 172 two-data KMP_BLOCKTIME=0
+mkl 172 two-data MKL_THREADING_LAYER=SEQUENTIAL
+cf 128 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+cf 128 two-data OMP_WAIT_POLICY=passive
+mkl 86 one OMP_PROC_BIND=close OMP_PLACES=cores
+cf 86 one OMP_PROC_BIND=close OMP_PLACES=cores
+cf 64 one OMP_PROC_BIND=spread OMP_PLACES=cores
+mkl 172 one OMP_PROC_BIND=close OMP_PLACES=threads
+mkl 172 one MKL_THREADING_LAYER=SEQUENTIAL
+pypi 64 one
+mkl 344 two-data OMP_PROC_BIND=close OMP_PLACES=threads
+mkl 128 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+cfl 128 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+cf 128 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+mkl 172 two-data OMP_PROC_BIND=spread OMP_PLACES=cores
+cfl 86 one OMP_PROC_BIND=close OMP_PLACES=cores

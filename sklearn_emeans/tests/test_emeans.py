@@ -5,9 +5,11 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from numpy.testing import assert_allclose, assert_array_equal
+from sklearn import config_context
 from sklearn.cluster import KMeans
 from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
+from sklearn.utils.validation import validate_data
 from threadpoolctl import threadpool_limits
 
 from sklearn_emeans import EMeans, _emeans
@@ -15,12 +17,14 @@ from sklearn_emeans._emeans import (
     _epochs_n_rows,
     _greedy_revival_period,
     _greedy_segments,
+    _permutation,
     _resolve_batch_size,
     _resolve_initial_step_size,
     _revive_dead_clusters,
 )
 from sklearn_emeans._greedy_revival import GreedyRevival, _pair
 from sklearn_emeans._kernels import (
+    _all_finite,
     _emeans_steps,
     _emeans_steps_sparse,
     _greedy_stats,
@@ -984,3 +988,79 @@ def test_emeans_allocation_failure():
         "predict",
         "MemoryError",
     ]
+
+
+@pytest.mark.parametrize("n_samples", [0, 1, 2, 3, 1023, 1024, 1025, 2049, 100_003])
+def test_permutation_same_as_numpy(n_samples):
+    # Same permutations and same state of the generator after them as with
+    # `RandomState.permutation`, which `_permutation` replaces in `fit`.
+    rng = np.random.RandomState(n_samples)
+    rng_numpy = np.random.RandomState(n_samples)
+    for _ in range(2):
+        permutation = _permutation(rng, n_samples)
+        assert permutation.dtype == np.intp
+        assert_array_equal(permutation, rng_numpy.permutation(n_samples))
+    assert rng.randint(2**31) == rng_numpy.randint(2**31)
+
+
+def test_permutation_other_random_states():
+    class MyRandomState(np.random.RandomState):
+        pass
+
+    # Another bit generator, the global RandomState of NumPy, and a subclass,
+    # for which `_permutation` calls its `permutation`.
+    for make_rng in [
+        lambda: np.random.RandomState(np.random.PCG64(0)),
+        lambda: np.random.mtrand._rand,
+        lambda: MyRandomState(0),
+    ]:
+        rng = make_rng()
+        state = rng.get_state(legacy=False)
+        expected = rng.permutation(5000)
+        after = rng.randint(2**31)
+        rng.set_state(state)
+        assert_array_equal(_permutation(rng, 5000), expected)
+        assert rng.randint(2**31) == after
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("n_threads", [1, 3])
+def test_all_finite(dtype, n_threads):
+    # More than one block of 2**18 values, and a number of values that is not
+    # a multiple of 8.
+    X = np.random.RandomState(0).normal(size=(30_011, 9)).astype(dtype)
+    assert _all_finite(X, n_threads)
+    assert _all_finite(X[:0], n_threads)
+    assert _all_finite(X[:1], n_threads)
+    positions = [0, 7, 8, 2**18 - 1, 2**18, X.size - 9, X.size - 1]
+    for value in [np.nan, np.inf, -np.inf]:
+        for position in positions:
+            X_bad = X.copy()
+            X_bad.flat[position] = value
+            assert not _all_finite(X_bad, n_threads)
+        assert not _all_finite(np.full((1, 3), value, dtype=dtype), n_threads)
+    # +inf and -inf together, whose sum would be NaN anyway, and values whose
+    # sum overflows although they are finite.
+    X_bad = X.copy()
+    X_bad[0, 0], X_bad[0, 1] = np.inf, -np.inf
+    assert not _all_finite(X_bad, n_threads)
+    assert _all_finite(np.full((100, 9), np.finfo(dtype).max, dtype=dtype), n_threads)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, object])
+def test_emeans_not_finite_error(value, dtype):
+    # The error is the one of scikit-learn, whose check is replaced by
+    # `_all_finite` when X is finite.
+    X = np.random.RandomState(0).normal(size=(300, 5)).astype(dtype)
+    emeans = EMeans(n_clusters=5, random_state=0).fit(X)
+    X[123, 4] = value
+    with pytest.raises(ValueError) as expected:
+        validate_data(EMeans(), X, dtype=[np.float64, np.float32])
+    for method in [EMeans(n_clusters=5).fit, emeans.predict, emeans.transform]:
+        with pytest.raises(ValueError) as error:
+            method(X)
+        assert str(error.value) == str(expected.value)
+    # As in scikit-learn, nothing is checked with assume_finite=True.
+    with config_context(assume_finite=True):
+        assert _emeans._validate_data(EMeans(), X) is not None

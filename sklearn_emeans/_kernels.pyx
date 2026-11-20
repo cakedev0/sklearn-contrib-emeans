@@ -32,13 +32,19 @@ the k-means|| initialization.
 clusters for the greedy revival, with the same assignment and the same
 parallelism over centers. `_trial_splits` and `_trial_splits_sparse` then try
 to split some clusters in two, in parallel over these clusters.
+
+`_all_finite` and `_shuffle` do what `fit` would otherwise spend sequential
+time on with many samples: the check of the input and the permutation of each
+epoch.
 """
 
 from cython cimport floating
 from cython.parallel cimport parallel, prange
 from cpython.exc cimport PyErr_CheckSignals
+from cpython.pycapsule cimport PyCapsule_GetPointer, PyCapsule_IsValid
 from cpython.ref cimport PyObject
 from libc.math cimport INFINITY
+from libc.stdint cimport uint32_t, uint64_t
 from libc.stdlib cimport calloc, malloc, free
 from libc.string cimport memcpy, memset
 from scipy.linalg.cython_blas cimport sgemm, dgemm
@@ -113,7 +119,34 @@ cdef extern from *:
         emeans_wait(n_ready, emeans_omp_num_threads());
         return emeans_load(n_failed) == 0;
     }
+
+    /* The interface of the bit generators of NumPy, as in
+       numpy/random/bitgen.h. It is copied here so that the build doesn't
+       need the headers of NumPy. */
+    #include <stdint.h>
+    typedef struct {
+        void *state;
+        uint64_t (*next_uint64)(void *state);
+        uint32_t (*next_uint32)(void *state);
+        double (*next_double)(void *state);
+        uint64_t (*next_raw)(void *state);
+    } emeans_bitgen_t;
+
+    /* Prefetch for a write. */
+    #if defined(__GNUC__) || defined(__clang__)
+    #define emeans_prefetch(p) __builtin_prefetch((p), 1)
+    #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    #include <xmmintrin.h>
+    #define emeans_prefetch(p) _mm_prefetch((const char *) (p), _MM_HINT_T0)
+    #else
+    #define emeans_prefetch(p) ((void) 0)
+    #endif
     """
+    ctypedef struct emeans_bitgen_t:
+        void *state
+        uint64_t (*next_uint64)(void *state) noexcept nogil
+        uint32_t (*next_uint32)(void *state) noexcept nogil
+    void emeans_prefetch(void *p) noexcept nogil
     int emeans_omp_max_threads() noexcept nogil
     int emeans_omp_thread_num() noexcept nogil
     intp_t emeans_fetch_add(intp_t *counter, intp_t value) noexcept nogil
@@ -149,6 +182,122 @@ def _omp_max_threads():
 
 def _chunk_size():
     return CHUNK_SIZE
+
+
+# Number of values checked by one iteration of the loop of `_all_finite`.
+cdef intp_t FINITE_BLOCK_SIZE = 1 << 18
+
+# Number of swaps of `_shuffle` whose indices are drawn ahead.
+cdef enum:
+    SHUFFLE_BATCH_SIZE = 1024
+
+
+def _all_finite(const floating[:, ::1] X, int n_threads):
+    """Whether X has no NaN and no infinity.
+
+    scikit-learn checks it with a sum of X on one thread. Here the blocks of
+    values are checked in parallel.
+    """
+    cdef:
+        intp_t n_values = X.shape[0] * X.shape[1]
+        intp_t n_blocks = (n_values + FINITE_BLOCK_SIZE - 1) // FINITE_BLOCK_SIZE
+        const floating *values
+        intp_t b
+        intp_t n_not_finite = 0
+
+    if n_values == 0:
+        return True
+    values = &X[0, 0]
+    n_threads = max(1, min(n_threads, n_blocks))
+    for b in prange(n_blocks, nogil=True, schedule="static", num_threads=n_threads):
+        n_not_finite += _has_not_finite(
+            values + b * FINITE_BLOCK_SIZE,
+            min(FINITE_BLOCK_SIZE, n_values - b * FINITE_BLOCK_SIZE),
+        )
+    return n_not_finite == 0
+
+
+cdef inline bint _has_not_finite(const floating *x, intp_t n) noexcept nogil:
+    cdef:
+        # 8 partial sums, since the compiler must add floats in order.
+        floating[8] sums
+        floating total = 0.0
+        intp_t n_blocks = n // 8
+        intp_t i, j
+
+    for j in range(8):
+        sums[j] = 0.0
+    # x * 0 is 0 if x is finite and NaN otherwise: unlike the sum of x, the
+    # sum can't overflow.
+    for i in range(n_blocks):
+        for j in range(8):
+            sums[j] += x[8 * i + j] * 0
+    for i in range(8 * n_blocks, n):
+        total += x[i] * 0
+    for j in range(8):
+        total += sums[j]
+    return total != total
+
+
+def _shuffle(capsule, intp_t[::1] values):
+    """Shuffle `values` inplace as `RandomState.shuffle` does.
+
+    `capsule` is the capsule of the bit generator of the RandomState, whose
+    lock is held by the caller. The draws and the swaps are the ones of NumPy,
+    so the result and the state of the generator after the call are the same.
+    NumPy draws an index and swaps right away, and each swap is a cache miss
+    when `values` is large. Here the indices of the next swaps are drawn and
+    prefetched before these swaps are done, which is about twice as fast on
+    100M values or more.
+
+    Return False, without drawing anything, if `capsule` is not a bit
+    generator.
+    """
+    cdef:
+        emeans_bitgen_t *bitgen
+        intp_t *a
+        uint64_t[SHUFFLE_BATCH_SIZE] indices
+        uint64_t i, n_batch, b, last, mask, index
+        intp_t value
+
+    if not PyCapsule_IsValid(capsule, "BitGenerator"):
+        return False
+    if values.shape[0] < 2:
+        return True
+    bitgen = <emeans_bitgen_t *> PyCapsule_GetPointer(capsule, "BitGenerator")
+    a = &values[0]
+    with nogil:
+        i = values.shape[0] - 1
+        while i >= 1:
+            n_batch = min(<uint64_t> SHUFFLE_BATCH_SIZE, i)
+            for b in range(n_batch):
+                # `random_interval(bitgen, last)` of NumPy: a value in
+                # [0, last], by rejection among the values that have as many
+                # bits as `last`.
+                last = i - b
+                mask = last
+                mask |= mask >> 1
+                mask |= mask >> 2
+                mask |= mask >> 4
+                mask |= mask >> 8
+                mask |= mask >> 16
+                mask |= mask >> 32
+                if last <= 0xffffffffUL:
+                    index = bitgen.next_uint32(bitgen.state) & mask
+                    while index > last:
+                        index = bitgen.next_uint32(bitgen.state) & mask
+                else:
+                    index = bitgen.next_uint64(bitgen.state) & mask
+                    while index > last:
+                        index = bitgen.next_uint64(bitgen.state) & mask
+                indices[b] = index
+                emeans_prefetch(&a[index])
+            for b in range(n_batch):
+                value = a[i - b]
+                a[i - b] = a[indices[b]]
+                a[indices[b]] = value
+            i -= n_batch
+    return True
 
 
 def _emeans_steps(

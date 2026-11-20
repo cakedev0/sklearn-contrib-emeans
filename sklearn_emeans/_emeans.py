@@ -541,20 +541,15 @@ class EMeans(
     center during the last epoch. `labels_` and `inertia_` are then computed
     with an extra pass over the data, so that they match the final centers.
 
-    With `assignment='two-level'`, only the assignment changes. The initial
-    cells are an e-means of the initial centers. Before each mini-batch, each
-    cell center moves to the weighted mean of the centers of its cell, then
-    each center goes to the cell of the nearest cell center. A sample probes
-    its nearest cell, and the cells whose distance to the sample is at most
-    1.2 times the distance of the nearest one, limited to the 16 nearest
-    cells. It is assigned to the nearest center of the cells it probes.
-    `labels_` and `inertia_` come from a last pass with the same assignment,
-    so a few samples have a label that is not their closest center: use
-    `predict` for the exact labels, and `score` for the exact inertia, both
-    in `O(n_samples * n_clusters)`. The initializations 'k-means++' and
-    'k-means||' and `revival='greedy'` are not two-level: they keep their
-    cost in `O(n_samples * n_clusters)`, which then dominates the fit. The
-    fit keeps a copy of each mini-batch (`batch_size_` samples).
+    With `assignment='two-level'`, only the assignment changes. Before each
+    mini-batch, each cell center moves to the weighted mean of the centers of
+    its cell, then each center goes to the cell of its nearest cell center. A
+    sample probes its nearest cell and the cells that are at most 1.2 times as
+    far from it, up to 16 cells, and gets the nearest center of these cells.
+    `labels_` and `inertia_` come from a last pass with the same assignment:
+    `predict` and `score` give the exact ones, in
+    `O(n_samples * n_clusters)`. See :ref:`many_clusters` for what else to
+    know before using it.
 
     For array API inputs, the Cython kernels are replaced by array operations
     of the library of the input. The random numbers are drawn on the host in

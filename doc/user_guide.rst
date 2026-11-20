@@ -120,6 +120,8 @@ Initialization
 The time of a better initialization can also be spent on more epochs: compare
 both on your data.
 
+.. _many_clusters:
+
 Many clusters
 -------------
 
@@ -189,6 +191,28 @@ one socket of a Xeon 6787P server (MKL, 86 threads, one per core):
 
 At the rate of the exact fits of this table, the last one would take more than
 a week with `"exact"`.
+
+This is the two-level assignment of o-means [3]_, a variant of e-means for
+NVIDIA GPUs: one e-means on all the centers, where cells that are rebuilt
+during the fit select the centers each sample is compared to. `EMeans` runs it
+on CPUs, with three differences:
+
+- It has `sqrt(n_clusters)` cells, where o-means has cells of about 128
+  centers. Both have 128 cells with 16,384 clusters. With more clusters, the
+  number of cells of o-means grows like `n_clusters`, and so does the cost of
+  comparing each sample to them. o-means was evaluated up to 65,536 clusters.
+- The number of cells probed by a sample depends on the sample, where o-means
+  probes a fixed number of cells (12 to 24). A sample that is clearly nearer
+  to one cell is compared to fewer centers. In the experiments behind this
+  implementation, this halved the loss of inertia of a fixed number of probes
+  on three datasets out of four, for the same number of comparisons.
+- The cells are updated before each mini-batch, and `labels_` comes from a
+  pass on the final centers. o-means rebuilds its cells at each revival during
+  the first epoch, then every half epoch, and returns the labels of the last
+  epoch, during which the centers still move.
+
+We have not compared the two on the same hardware. On a GPU, use o-means:
+`assignment="two-level"` does not support array API inputs.
 
 What to know before using it:
 
@@ -286,3 +310,6 @@ References
 .. [2] B. Bahmani, B. Moseley, A. Vattani, R. Kumar and S. Vassilvitskii,
    "Scalable K-Means++", Proceedings of the VLDB Endowment, 2012.
    `arXiv:1203.6402 <https://arxiv.org/abs/1203.6402>`_
+
+.. [3] "o-means: e-means with a two-level assignment", `pull request 5917 of
+   faiss <https://github.com/facebookresearch/faiss/pull/5917>`_, 2026.

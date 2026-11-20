@@ -364,6 +364,88 @@ the coarse search 15%.
   changed nothing measurable (interleaved A/B on the 5 cases), so they are
   not in.
 
+### More than 64 threads, two sockets
+
+All the runs above use 64 threads on one socket. `EMeans` never uses more
+threads than the compiled limit of OpenBLAS (64 in the SciPy wheels, 128 in
+conda-forge), since OpenBLAS can crash above it. MKL has no limit. Fit times
+in seconds on the whole server (`benchlock` slot `all`, 2 x 86 cores), on DEEP
+with 10k samples per cluster, 5 epochs. "Pinned" is `OMP_PROC_BIND` with
+`OMP_PLACES=cores`, one thread per core. "Parallel" is the time in the Cython
+kernels (steps and labelling pass), "sequential" the rest of the fit.
+
+500M samples, 50k clusters, 2 fits each (`results/xeon/cpu_threads_500m.jsonl`):
+
+| threads and data | BLAS | threads | fit | parallel | sequential |
+|---|---|---|---|---|---|
+| one socket | OpenBLAS (wheels) | 64 | 473, 474 | 381 | 93 |
+| one socket | MKL | 86, pinned | 409, 410 | 304 | 105 |
+| one socket | MKL | 172 (hyperthreads), pinned | 400, 400 | 295 | 105 |
+| two sockets, data interleaved | OpenBLAS (conda-forge) | 128, pinned | 316, 315 | 219 | 97 |
+| two sockets, data interleaved | MKL | 172, pinned | 276, 274 | 180 | 95 |
+
+Quick probes on 100M samples, 10k clusters, one fit each
+(`results/xeon/cpu_threads_probe.jsonl`, 38 runs):
+
+| threads and data | BLAS | threads | fit | fit, pinned |
+|---|---|---|---|---|
+| one socket | OpenBLAS (wheels) | 32 | 88.3 | |
+| one socket | OpenBLAS (wheels) | 64 | 62.9, 63.1, 63.2 | |
+| one socket | OpenBLAS (conda-forge) | 64 | 62.7 | 62.1 |
+| one socket | MKL | 64 | 62.7 | |
+| one socket | OpenBLAS (conda-forge) | 86 | 55.0 | 54.9 |
+| one socket | MKL | 86 | 56.9 | 53.4 |
+| one socket | MKL | 172 (hyperthreads) | 50.9 | 50.5 |
+| two sockets, `numactl --interleave=all` | OpenBLAS (conda-forge) | 128 | 57.7 | |
+| two sockets, `numactl --interleave=all` | MKL | 172 | 54.6 | |
+| two sockets, data interleaved | OpenBLAS (conda-forge) | 128 | 50.4 | 46.7, 47.0 |
+| two sockets, data interleaved | MKL | 128 | 47.6 | 45.3 |
+| two sockets, data interleaved | MKL | 172 | 46.7 | 41.3, 41.2, 41.1 |
+| two sockets, data interleaved | MKL | 344 (hyperthreads) | 43.5 | 41.6 |
+
+- **Two sockets: 1.72x faster** at 500M samples with MKL and 172 pinned
+  threads, 1.50x with the OpenBLAS of conda-forge and 128 threads.
+- **Interleave the data, not the process.** `numactl --interleave=all` also
+  spreads the work buffers and the permutations over the two sockets: the
+  sequential code went from 16.5 s to 27 s on the 100M probe, which ate the
+  gain of the second socket. `bench_cpu.py --interleave-data` only interleaves
+  `X`, with an `mbind` before it is read.
+- **The number of threads matters, not the BLAS.** At 64 threads, the three
+  BLAS give the same time. At 86 and 128 threads, MKL is 1 to 3 s faster on
+  the 100M probe (2% to 6%). The OpenBLAS of conda-forge with the OpenMP
+  runtime of LLVM (the `cfl` environment) is like the one with libgomp, so
+  this is MKL and not the runtime.
+- **Pinning helps above 64 threads**: 5 s out of 46.7 s at 172 threads on two
+  sockets, and the repeats then agree to 0.3 s.
+- No gain from `KMP_BLOCKTIME=0` (47.6 s against 46.7 s),
+  `MKL_THREADING_LAYER=SEQUENTIAL` (45.1 s), `OMP_WAIT_POLICY=passive` with
+  libgomp (49.8 s against 50.4 s), the default memory policy of Linux in place
+  of interleaved data (46.1 s), or hyperthreads on two sockets. All unpinned,
+  so within the 5 s that pinning moves. Hyperthreads on one socket gain 2% to
+  5%.
+- **The parallel part does not scale linearly**: 2.1x faster with 2.7x the
+  cores, from 64 threads on one socket to 172 on two (1.5x from 32 to 64
+  threads on one socket). Not profiled.
+- **The sequential code is the floor**: 93 to 105 s at 500M samples, a third
+  of the best time. In the baseline: 73 s for the 5 permutations of 500M rows
+  (14.6 s each), 11 s for the check of the input by scikit-learn, which is
+  one `np.sum(X)`, and 8.6 s for the random init, a weighted `choice` that
+  costs `O(n_samples)`.
+- The inertia is the same to all digits in all the runs of each table, with
+  the three BLAS and all the numbers of threads.
+
+Commands, in `~/work/hmeans-cpu` on the server. The environments are the venv
+of the wheels and three pixi environments from conda-forge (`cf`, `cfl`,
+`mkl`), with the branch installed in each:
+
+```
+benchlock --tag "h-means threads probe" all -- \
+    ./xeon_cpu_threads_probe.sh threads_probes.txt
+DATA=deep500M K=50000 FLAGS=--in-memory REPEAT=2 OUT=res/threads_500m.jsonl \
+    benchlock --tag "h-means threads 500M" all -- \
+    ./xeon_cpu_threads_probe.sh threads_500m.txt
+```
+
 ### Semantics, for another backend
 
 1. `g = max(1, round(sqrt(n_clusters)))` cells. The initial cells are
@@ -424,7 +506,9 @@ assignment.
   search of the fallback, `cpu_ratio` the ratios (1.15 everywhere, 1.2
   everywhere, 1.3 for the labels, with an earlier version of the kernels) and
   `cpu_ab` the A/B of the prefetch and of the task order, with and without
-  `assume_finite`.
+  `assume_finite`. `cpu_threads_probe` and `cpu_threads_500m` are the runs
+  with more threads, other BLAS and two sockets
+  (`scripts/xeon_cpu_threads_probe.sh`, with the lists of runs next to it).
 - `results/all_runs.csv`, `results/scaling.csv`: written by `summarize.py`.
 - `show.py`, `show_om.py`: print tables from JSON lines.
 - `prof.py`, `prof_cpu.py`: profiling helpers.

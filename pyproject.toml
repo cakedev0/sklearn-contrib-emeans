@@ -68,8 +68,6 @@ select = ["E", "F", "W", "I", "UP"]
 [tool.ruff.lint.per-file-ignores]
 # The examples are cut in cells, each with its own imports.
 "examples/*" = ["E402"]
-# Research prototypes, not part of the package.
-"research/*" = ["E402", "E501", "E741"]
 
 [tool.cython-lint]
 max-line-length = 88

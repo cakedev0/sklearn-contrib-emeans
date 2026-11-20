@@ -76,9 +76,7 @@ probing constants (`_TWO_LEVEL_*` in `_emeans.py`). A step first makes the
 cells follow the centers (`_refresh_cells`), then assigns the batch
 (`_search`). The pieces of work of each phase must not depend on the number of
 threads, since the rounding of a GEMM depends on its shape. The pure NumPy
-reference is in `tests/test_two_level.py`. `research/h-means/README.md` has
-the measurements behind the constants and the semantics to mirror in another
-backend.
+reference is in `tests/test_two_level.py`.
 
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and

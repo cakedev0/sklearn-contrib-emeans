@@ -246,6 +246,21 @@ samples (200k at `k=100k`): "centers" is the exact inertia of the centers,
   with its ratio of 1.15. On CLIP it is slower (2.59 s against 2.28 s, and
   1.91 s with 1.15): see "What does not meet the target".
 
+The same run once the check of the input is parallel and the permutations
+are faster (#24, `results/xeon/cpu_main_with24.jsonl`), with the same losses:
+
+| data | k | exact | prototype 1.15 | prototype 1.2 | two-level | speed-up |
+|---|---|---|---|---|---|---|
+| SIFT 1M | 10k | 4.74 | 1.49 | 1.77 | 0.89 | 5.3x |
+| GloVe 1.18M | 10k | 6.70 | 2.59 | 2.65 | 2.24 | 3.0x |
+| CLIP 1M | 10k | 10.5 | 1.86 | 2.16 | 2.07 | 5.1x |
+| DEEP 10M | 10k | 39.4 | 11.2 | 14.1 | 5.42 | 7.3x |
+| DEEP 10M | 100k | 477 | 16.6 | 20.4 | 12.3 | 39x |
+
+Two-level is then faster than the prototype with the same ratio on the five
+cases, by 1.04x to 2.6x. On CLIP it went from 2.59 s to 2.07 s. The prototype
+with its ratio of 1.15 stays faster there (1.86 s).
+
 Scaling at 1,000 samples per cluster on DEEP (the first `n` samples of DEEP
 100M):
 
@@ -356,7 +371,9 @@ the coarse search 15%.
   1M x 512 in float32, sequential), which the prototype does not do. With
   `sklearn.config_context(assume_finite=True)`, the fit was about 0.4 s
   shorter on CLIP (2.0 s to 2.2 s against 2.4 s to 2.6 s) and 0.6 s shorter
-  on DEEP 10M at `k=10k` (measured with the earlier ratios).
+  on DEEP 10M at `k=10k` (measured with the earlier ratios). Since #24, this
+  check is parallel, and CLIP takes 2.07 s against 2.16 s for the prototype
+  with the same ratio (second table of "Results").
 - **The ratio is not the one of the prototype**: 1.2 in place of 1.15, see
   "The ratio".
 - Prefetching the rows in the copies of the batch, and running the short
@@ -583,7 +600,8 @@ assignment.
   are versions of the CPU kernels: the inertia is valid in all of them, the
   CPU timings only in `v4`. `cpu_*.jsonl` are the runs of `EMeans`
   (`bench_cpu.py`) and of the prototype in the same `benchlock` call:
-  `cpu_main` and `cpu_scaling` are the tables above, `cpu_small_k` the
+  `cpu_main` and `cpu_scaling` are the tables above (`cpu_main_with24` is
+  the run with #24), `cpu_small_k` the
   search of the fallback, `cpu_ratio` the ratios (1.15 everywhere, 1.2
   everywhere, 1.3 for the labels, with an earlier version of the kernels) and
   `cpu_ab` the A/B of the prefetch and of the task order, with and without

@@ -10,6 +10,7 @@ them with the runs of the prototype.
 import argparse
 import json
 import os
+import resource
 import time
 
 import numpy as np
@@ -19,15 +20,50 @@ from threadpoolctl import threadpool_limits
 
 from sklearn_emeans import EMeans, _emeans
 
-DIRS = [os.path.expanduser("~/work/hkm/data"), os.path.expanduser("~/real-emb-data")]
+DIRS = [
+    os.path.expanduser("~/work/hkm/data"),
+    os.path.expanduser("~/work/hmeans-cpu/data"),
+    os.path.expanduser("~/real-emb-data"),
+]
+DEEP_N_SAMPLES = {
+    "deep10M": 10_000_000,
+    "deep100M": 100_000_000,
+    "deep500M": 500_000_000,
+}
 
 
-def load(name, n=None):
+def read_in_memory(path, n_samples, n_features, offset):
+    """Read float32 rows in anonymous memory, without keeping the page cache.
+
+    For data that takes most of the memory of a socket: the memory policy of
+    the process then decides where the data is, and the page cache of the file
+    does not take the room of the work buffers.
+    """
+    X = np.empty((n_samples, n_features), dtype=np.float32)
+    buffer = memoryview(X).cast("B")
+    chunk = 2**30
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        done = 0
+        while done < len(buffer):
+            n_read = os.preadv(fd, [buffer[done : done + chunk]], offset + done)
+            if n_read == 0:
+                raise EOFError(path)
+            os.posix_fadvise(fd, offset + done, n_read, os.POSIX_FADV_DONTNEED)
+            done += n_read
+    finally:
+        os.close(fd)
+    return X
+
+
+def load(name, n=None, in_memory=False):
     for directory in DIRS:
         if name.startswith("deep"):
             path = os.path.join(directory, name + ".fbin")
             if os.path.exists(path):
-                n_all = 100_000_000 if name == "deep100M" else 10_000_000
+                n_all = DEEP_N_SAMPLES[name]
+                if in_memory:
+                    return read_in_memory(path, n_all if n is None else n, 96, 8)
                 X = np.memmap(
                     path, dtype=np.float32, mode="r", offset=8, shape=(n_all, 96)
                 )
@@ -77,6 +113,11 @@ def main():
         action="store_true",
         help="skip the check of the input of scikit-learn, as the prototype",
     )
+    parser.add_argument(
+        "--in-memory",
+        action="store_true",
+        help="read the data in anonymous memory (DEEP only), not as a memory map",
+    )
     parser.add_argument("--tag", default="")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -88,13 +129,15 @@ def main():
     if args.min_clusters is not None:
         _emeans._TWO_LEVEL_MIN_CLUSTERS = args.min_clusters
 
-    X = load(args.data, args.n)
+    X = load(args.data, args.n, args.in_memory)
     n_samples = X.shape[0]
     n_threads = _emeans._openmp_effective_n_threads()
     print(f"{args.data}: {X.shape}, {n_threads} threads", flush=True)
     # Warm-up of the thread pools.
     EMeans(n_clusters=64, n_epochs=1, random_state=0).fit(X[:20000])
-    permutation = np.random.RandomState(4242).permutation(n_samples)
+    # Only the first million is kept: the permutation of 500M rows is 4 GB.
+    permutation = np.random.RandomState(4242).permutation(n_samples)[:1_000_000]
+    permutation = permutation.copy()
 
     for k in args.k:
         eval_rows = np.sort(permutation[: 1_000_000 if k <= 20000 else 200_000])
@@ -127,8 +170,14 @@ def main():
                     "threads": n_threads,
                     "slot": os.environ.get("BENCHLOCK_SLOT"),
                     "assume_finite": args.assume_finite,
+                    # Below this number of clusters, "two-level" is "exact".
+                    "min_clusters": _emeans._TWO_LEVEL_MIN_CLUSTERS,
+                    "in_memory": args.in_memory,
                     "t_fit": t_fit,
                     "batch_size": emeans.batch_size_,
+                    "inertia_fit": emeans.inertia_ / n_samples,
+                    "max_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    / 2**20,
                 }
                 result.update(
                     evaluate(

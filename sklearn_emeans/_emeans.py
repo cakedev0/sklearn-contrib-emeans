@@ -477,7 +477,7 @@ class EMeans(
         to the cells, then to the centers of its nearest cells only (16 at
         most, fewer when the nearest one is clearly nearer than the others).
         An epoch costs about `O(n_samples * sqrt(n_clusters))`. The inertia
-        is typically 0.1% to 0.2% higher than with 'exact'. See the Notes
+        is typically 0.05% to 0.15% higher than with 'exact'. See the Notes
         section.
 
         Below 1024 clusters, where it would not be faster, 'two-level' is the

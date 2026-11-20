@@ -2569,7 +2569,7 @@ def _labels_inertia_two_level(
                     X_chunk == NULL
                     or distances == NULL
                     or chunk_labels == NULL
-                        or sums == NULL,
+                    or sums == NULL,
                 ):
                     _two_level_labels_worker(
                         &tl, &X[0, 0], n_samples, &centers[0, 0],

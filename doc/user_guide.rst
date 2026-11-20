@@ -229,7 +229,9 @@ What to know before using it:
 - `init="k-means||"`, `init="k-means++"` and `revival="greedy"` still compare
   samples to all the centers. With many clusters they take most of the fit
   time: prefer `init="random"`.
-- The fit keeps a copy of each mini-batch, `batch_size_` samples.
+- The fit needs more memory than with `"exact"`: a copy of each mini-batch
+  (`batch_size_` samples), about 400 bytes per sample of the mini-batch for
+  the cells it probes, and a copy of the centers.
 - It is experimental: its algorithm may change from one version to the next,
   and its results with it.
 

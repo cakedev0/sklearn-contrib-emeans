@@ -12,7 +12,8 @@ Methods, all with 5 epochs and a random init:
   kernels (`_two_level_triton.PRECISION`) in place of float16.
 - `faiss-e`, `omeans-p4`, `omeans-p8`: the dense e-means and o-means of the
   owlgebra-ai/faiss fork, o-means with round(sqrt(K)) cells and 4 or 8 probes.
-  They need the fork on PYTHONPATH.
+  They need `faiss.contrib` of the fork.
+- `omeans`: o-means with its default cells (K / 128) and probes (12 to 24).
 
 Each line of OUT has the best fit time of `--reps` runs and the metrics of
 `hkm.evaluate` (same rows as `exp.py` and `omeans_run.py`): the exact inertia
@@ -72,14 +73,11 @@ def fit(method, X, k, n_epochs, init):
         return centers.float(), labels.long(), {}
     from faiss.contrib.o_means import Omeans
 
+    cells = {}
+    if method != "omeans":
+        cells = dict(nlist=max(2, round(k**0.5)), nprobe=int(method.split("-p")[1]))
     model = Omeans(
-        X.shape[1],
-        k,
-        nepochs=n_epochs,
-        batch_law="throughput",
-        seed=0,
-        nlist=max(2, round(k**0.5)),
-        nprobe=int(method.split("-p")[1]),
+        X.shape[1], k, nepochs=n_epochs, batch_law="throughput", seed=0, **cells
     )
     centers, labels = model.train(X, init)[:2]
     extra = dict(nlist=model.recipe["nlist"], nprobe=model.recipe["nprobe"])

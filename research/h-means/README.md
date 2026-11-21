@@ -263,6 +263,37 @@ The two-level rows at `k=30k` and `k=100k` are from a second run of the same
 commands, after the e-means of more than 16k initial centers moved from the
 host to the device (4.53 s to 4.29 s at `k=100k`).
 
+### GPU: after the alignment on main (ratio 1.2)
+
+Same benchmark with the GPU path rebased on main: ratio 1.2 in the steps and
+in the labelling pass (it was 1.15 and 1.3 above), and the permutations of
+main. Run on `aws-l4-2`, another VM with the same GPU, so the times are not
+those of the table above. `omeans` is o-means with its defaults (`k / 128`
+cells, 16 or 24 probes). `scripts/l4_gpu_main.sh`, raw results in
+`results/l4/gpu_main_v2.jsonl`.
+
+Fit time in seconds, loss on labels against `emeans`:
+
+| data | k | `emeans` | `faiss-e` | `omeans` nprobe=4 | `omeans` nprobe=8 | `omeans` | two-level |
+|---|---|---|---|---|---|---|---|
+| DEEP 1M | 10k | 2.95 | 0.33 | 0.059 (+0.77%) | 0.084 (+0.23%) | 0.14 (+0.02%) | 0.32 (+0.08%) |
+| DEEP 3M | 30k | 26.2 | 2.69 | 0.25 (+0.86%) | 0.39 (+0.31%) | 1.04 (+0.07%) | 1.02 (+0.15%) |
+| DEEP 10M | 100k | 340 | 28.4 | 1.55 (+0.92%) | 2.44 (+0.38%) | fails | 4.52 (+0.10%) |
+| DEEP 10M | 10k | 29.7 | 3.38 | 0.68 (+0.76%) | 1.19 (+0.23%) | 2.32 (+0.07%) | 3.20 (+0.06%) |
+| DEEP 10M | 1M | | | | fails | fails | 16.4 |
+| SIFT 1M | 10k | 3.06 | 0.34 | 0.068 (+0.66%) | 0.095 (+0.15%) | 0.17 (+0.01%) | 0.37 (+0.09%) |
+| GloVe 1.18M | 10k | 5.14 | 0.77 | 0.18 (+0.34%) | 0.32 (+0.13%) | 0.66 (+0.06%) | 1.01 (+0.05%) |
+| CLIP 1M | 10k | 8.55 | 1.22 | 0.28 (+0.61%) | 0.36 (+0.21%) | 0.51 (+0.07%) | 0.98 (+0.03%) |
+
+- The loss on labels is at most +0.15%, with the ratio of the CPU path.
+- o-means with its defaults has the same loss and is 1.4x to 2.3x faster at
+  `k=10k`, as fast at `k=30k`, and fails on the L4 from `k=100k` (shared
+  memory at `k=100k`, 30 GB of buckets at `k=1M`).
+- The float16 and TF32 kernels take the same time at `k=10k` (0.324 s both
+  on DEEP 1M), float16 is 11% faster at `k=100k` (4.52 s against 5.10 s).
+- The CuPy cases of the tests did not run on this VM (no environment with
+  both CuPy and PyTorch). They passed on `aws-l4-3` before the rebase.
+
 ## Journal
 
 1. **Frozen two-level (`h2`).** +0.7% to +2.5% on centers and +1.6% to +4.0%

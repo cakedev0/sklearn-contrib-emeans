@@ -62,8 +62,9 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   `sqrt(n_clusters)` cells that follow them during the fit, and a sample is
   only compared to the centers of its nearest cells: an epoch costs about
   `O(n_samples * sqrt(n_clusters))` instead of `O(n_samples * n_clusters)`.
-  It is for dense NumPy inputs, and it is the same as `"exact"` below 1024
-  clusters. `labels_` and `inertia_` then come from the two-level assignment
+  It is for dense NumPy inputs and for NVIDIA GPUs (PyTorch CUDA tensors and
+  CuPy arrays, with PyTorch and Triton installed), and it is the same as
+  `"exact"` below 1024 clusters. `labels_` and `inertia_` then come from the two-level assignment
   too (`predict` and `score` stay exact).
 - `fit`, `predict`, `fit_predict`, `transform`, `fit_transform` and `score`
   work as for `sklearn.cluster.KMeans`.

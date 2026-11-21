@@ -67,7 +67,7 @@ the same result up to rounding, and the tests compare them with each other and
 with the pure NumPy `_reference_step` of `tests/test_emeans.py`. A change to
 the algorithm goes in both.
 
-`assignment="two-level"` (dense NumPy input only, 1024 clusters or more) is
+`assignment="two-level"` (dense NumPy input, 1024 clusters or more) is
 a third set of kernels, at the end of `_kernels.pyx`: `_emeans_steps_two_level`
 and `_labels_inertia_two_level`. They take the same arguments as the exact
 ones, plus the cells (`cells`, `cell_of_center`), which `fit` creates with
@@ -81,6 +81,17 @@ reference is in `tests/test_two_level.py`.
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and
 `labels_` / `inertia_` come from an extra assignment pass.
+
+On CUDA devices, `assignment="two-level"` runs in `_two_level_triton.py`:
+Triton kernels for the assignment and PyTorch operations for the refresh of
+the cells (`TwoLevelAssigner`), plugged in `_array_api.emeans_steps` and
+`labels_inertia`. Same cells, same refresh, same probing rule and same random
+numbers as the Cython kernels. It imports PyTorch and Triton at module level,
+so it is only imported inside functions. A CuPy array is fitted through a
+PyTorch view of it. The kernels read scaled float16 copies by default
+(`PRECISION`): the tests that compare labels set it to `"ieee"`. They only run
+on a machine with a CUDA device, so run `tests/test_array_api.py` there after
+a change to this path.
 
 Initialization:
 

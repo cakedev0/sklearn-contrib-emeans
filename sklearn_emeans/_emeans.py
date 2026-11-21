@@ -96,6 +96,12 @@ _TWO_LEVEL_CELLS_N_EPOCHS = 10
 # the exact one, which is used instead.
 _TWO_LEVEL_MIN_CLUSTERS = 1024
 
+# For array API inputs, the e-means of the initial centers runs on the host
+# up to this number of clusters, where it is faster than on the device (on
+# an NVIDIA L4 with 8 vCPUs: 0.04 s against 0.05 s for 10k clusters, 0.30 s
+# against 0.05 s for 100k).
+_TWO_LEVEL_CELLS_HOST_MAX_CLUSTERS = 2**14
+
 _CHUNK_SIZE = _chunk_size()
 
 _THREADPOOL_CONTROLLER = None
@@ -481,7 +487,9 @@ class EMeans(
         section.
 
         Below 1024 clusters, where it would not be faster, 'two-level' is the
-        same as 'exact'. It only supports dense NumPy inputs.
+        same as 'exact'. It supports dense NumPy inputs and, with
+        `array_api_dispatch=True`, PyTorch tensors on CUDA devices and CuPy
+        arrays, for which PyTorch and Triton must be installed.
 
         .. warning::
             'two-level' is experimental: its algorithm may change from one
@@ -560,6 +568,12 @@ class EMeans(
     k-means++ on the candidates runs on the host, and `init="k-means++"`
     copies the data to the host. `revival="greedy"` copies its sample of the
     data to the host, where it estimates the costs and the gains.
+
+    With `assignment='two-level'` on a CUDA device, the assignment runs in
+    Triton kernels. They compare float16 copies of the samples and of the
+    centers, scaled by a power of two, so a sample that is almost as close to
+    two centers can get the farthest one, whatever the dtype of the input.
+    The centers and `inertia_` are computed from the samples themselves.
 
     References
     ----------
@@ -763,11 +777,6 @@ class EMeans(
         self._check_params()
         xp = _array_api.get_namespace(X)
         if xp is not None:
-            if self.assignment == "two-level":
-                raise ValueError(
-                    "assignment='two-level' is not supported for array API "
-                    "inputs with array_api_dispatch=True."
-                )
             return self._fit_array_api(xp, X)
         X = _validate_data(self, X)
         if self.assignment == "two-level" and sp.issparse(X):
@@ -962,6 +971,10 @@ class EMeans(
             raise ValueError(
                 f"n_samples={n_samples} should be >= n_clusters={n_clusters}."
             )
+        to_input_namespace = None
+        if self.assignment == "two-level":
+            # The fit runs on a PyTorch view of X.
+            xp, X, to_input_namespace = _array_api.two_level_namespace(xp, X)
         random_state = check_random_state(self.random_state)
         device = _array_api.device(X)
         acc_dtype = getattr(xp, _array_api.accumulator_dtype(xp, device))
@@ -980,11 +993,21 @@ class EMeans(
 
         weight_ema = xp.full(n_clusters, _INIT_WEIGHT, dtype=acc_dtype, device=device)
         epoch_sums = epoch_counts = None
+        assigner = None
+        if self.assignment == "two-level" and n_clusters >= _TWO_LEVEL_MIN_CLUSTERS:
+            assigner = _array_api.two_level_assigner(
+                X,
+                *self._init_cells_array_api(xp, centers, random_state),
+                _TWO_LEVEL_MAX_PROBES,
+                _TWO_LEVEL_RATIO,
+                batch_size,
+            )
         revive = partial(
             _array_api.revive_dead_clusters,
             xp,
             random_state=random_state,
             threshold=self.revival,
+            assigner=assigner,
         )
         greedy = self._greedy_revival(
             X,
@@ -1010,7 +1033,9 @@ class EMeans(
                 if not greedy.is_revival_step(n_calls * greedy.period):
                     return centers, weight_ema
                 with _threadpool_controller().limit(limits=1, user_api="blas"):
-                    return _array_api.revive_greedy(xp, greedy, centers, weight_ema)
+                    return _array_api.revive_greedy(
+                        xp, greedy, centers, weight_ema, assigner
+                    )
 
         step = 0
         for epoch, n_rows in enumerate(epochs_n_rows):
@@ -1038,6 +1063,7 @@ class EMeans(
                 step,
                 revival_period,
                 revive,
+                assigner,
             )
             step += n_epoch_steps
 
@@ -1051,11 +1077,37 @@ class EMeans(
             centers,
         )
 
+        if assigner is not None:
+            assigner.refresh(centers, weight_ema)
+        labels, self.inertia_ = _array_api.labels_inertia(xp, X, centers, assigner)
+        if to_input_namespace is not None:
+            centers, labels = to_input_namespace(centers), to_input_namespace(labels)
         self.cluster_centers_ = centers
+        self.labels_ = labels
         self._n_features_out = n_clusters
-        self.labels_, self.inertia_ = _array_api.labels_inertia(xp, X, centers)
         self.batch_size_ = batch_size
         return self
+
+    def _init_cells_array_api(self, xp, centers, random_state):
+        """Initial cells of the two-level assignment, on the device.
+
+        Same as `_init_cells`: the e-means of the centers runs on the host, or
+        on the device when there are many centers. Both give the same cells
+        up to rounding.
+        """
+        device = _array_api.device(centers)
+        if centers.shape[0] <= _TWO_LEVEL_CELLS_HOST_MAX_CLUSTERS:
+            cells, cell_of_center = _init_cells(
+                _array_api.to_numpy(xp, centers), random_state
+            )
+            return (
+                _array_api.from_numpy(
+                    xp, cells, _array_api.dtype_name(xp, centers), device
+                ),
+                _array_api.index_array(xp, cell_of_center, device),
+            )
+        cells, cell_of_center = _init_cells(centers, random_state)
+        return cells, xp.astype(cell_of_center, xp.int64)
 
     def _check_test_data(self, X):
         """Validate X, and return its array namespace and the centers.

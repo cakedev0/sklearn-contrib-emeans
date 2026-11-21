@@ -211,8 +211,11 @@ on CPUs, with three differences:
   the first epoch, then every half epoch, and returns the labels of the last
   epoch, during which the centers still move.
 
-We have not compared the two on the same hardware. On a GPU, use o-means:
-`assignment="two-level"` does not support array API inputs.
+On an NVIDIA L4, with 1M to 10M samples and 10,000 clusters, o-means with its
+default settings is 1.4 to 2.3 times faster than `assignment="two-level"` on
+the same GPU (see :ref:`array_api_inputs`), for the same inertia. With 100,000
+clusters and more, o-means fails on this GPU, which lacks the memory its
+kernels need.
 
 What to know before using it:
 
@@ -224,8 +227,9 @@ What to know before using it:
   `O(n_samples * n_clusters)`.
 - Below 1024 clusters it is not faster, and `"two-level"` is the same as
   `"exact"`.
-- It only supports dense NumPy inputs: sparse and array API inputs raise an
-  error.
+- It supports dense NumPy inputs and, with `array_api_dispatch=True`, PyTorch
+  tensors on CUDA devices and CuPy arrays (see :ref:`array_api_inputs`).
+  Sparse inputs and the other array API inputs raise an error.
 - `init="k-means||"`, `init="k-means++"` and `revival="greedy"` still compare
   samples to all the centers. With many clusters they take most of the fit
   time: prefer `init="random"`.
@@ -276,6 +280,13 @@ estimators, this must be enabled with `array_api_dispatch=True`, and with
   run to the next. With PyTorch, `torch.use_deterministic_algorithms(True)`
   makes the fits reproducible. They were 10-60% slower with it on an NVIDIA
   L4.
+- `assignment="two-level"` runs on NVIDIA GPUs only, for PyTorch tensors on
+  CUDA devices and CuPy arrays. It needs PyTorch and Triton, also for CuPy
+  arrays, which are fitted through a PyTorch view of their memory. Its
+  kernels compare float16 copies of the samples and of the centers, scaled by
+  a power of two: a sample that is almost as close to two centers can get the
+  farthest one, whatever the dtype of the input. The centers and `inertia_`
+  are computed from the samples themselves.
 - With `init="k-means||"`, the sampling rounds run on the device and the final
   k-means++ on the candidates runs on the host. `init="k-means++"` copies the
   data to the host.

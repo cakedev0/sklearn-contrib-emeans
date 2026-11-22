@@ -1,3 +1,4 @@
+import math
 import subprocess
 import sys
 
@@ -20,6 +21,7 @@ from sklearn_emeans._emeans import (
     _permutation,
     _resolve_batch_size,
     _resolve_initial_step_size,
+    _revive_cheap_clusters,
     _revive_dead_clusters,
 )
 from sklearn_emeans._greedy_revival import GreedyRevival, _pair
@@ -407,6 +409,271 @@ def test_emeans_revival_zero_never_revives(monkeypatch):
     EMeans(n_clusters=10, revival=0, random_state=0).fit(X)
     with pytest.raises(AssertionError, match="revival called"):
         EMeans(n_clusters=10, random_state=0).fit(X)
+
+
+def _reference_removal_step(
+    X, batch_indices, centers, removal_cost, axis_sums, axes, step_size
+):
+    """NumPy implementation of the statistics of the cost-based revival.
+
+    One step, on the centers before the step, updating the statistics inplace.
+    """
+    X_batch = X[batch_indices]
+    if sp.issparse(X_batch):
+        X_batch = X_batch.toarray()
+    X_batch = X_batch.astype(np.float64)
+    centers = centers.astype(np.float64)
+    distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+    labels = distances.argmin(axis=1)
+    two_nearest = np.sort(distances, axis=1)[:, :2]
+    gaps = two_nearest[:, 1] - two_nearest[:, 0]
+
+    for j in range(centers.shape[0]):
+        mask = labels == j
+        y = X_batch[mask] - centers[j]
+        p = y @ axes[j].astype(np.float64)
+        removal_cost[j] = (1 - step_size) * removal_cost[j] + step_size * (
+            gaps[mask].sum()
+        )
+        axis_sums[j] = (1 - step_size) * axis_sums[j] + step_size * (p @ y)
+        if mask.any():
+            axes[j] = axis_sums[j] / np.linalg.norm(axis_sums[j])
+
+
+def _removal_stats(rng, n_clusters, n_features, dtype):
+    """Random statistics of the cost-based revival."""
+    axes = rng.normal(size=(n_clusters, n_features))
+    axes /= np.linalg.norm(axes, axis=1, keepdims=True)
+    return dict(
+        removal_cost=rng.uniform(size=n_clusters),
+        axis_sums=rng.normal(size=(n_clusters, n_features)),
+        axes=axes.astype(dtype),
+    )
+
+
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("n_threads", [1, 3])
+def test_emeans_step_removal_stats_match_reference(csr_container, dtype, n_threads):
+    rng = np.random.RandomState(0)
+    n_samples, n_features, n_clusters, batch_size = 1000, 7, 13, 600
+    # Far from the origin, where x - c cancels.
+    X = (10 + rng.normal(size=(n_samples, n_features))).astype(dtype)
+    if csr_container is not None:
+        X[X < 10.5] = 0
+        X[:50] = 0
+        X = csr_container(X)
+    batch_indices = rng.permutation(n_samples)[:batch_size].astype(np.intp)
+    centers = X[batch_indices[:n_clusters]]
+    centers = centers.toarray() if sp.issparse(X) else centers.copy()
+    # A center far from the data gets no row.
+    centers[0] = 100
+    weight_ema = rng.uniform(size=n_clusters)
+    stats = _removal_stats(rng, n_clusters, n_features, dtype)
+    stats_ref = {name: value.copy() for name, value in stats.items()}
+    axis_0, cost_0 = stats["axes"][0].copy(), stats["removal_cost"][0]
+    _reference_removal_step(X, batch_indices, centers, *stats_ref.values(), 0.3)
+    centers_ref, weight_ema_ref = centers.copy(), weight_ema.copy()
+    _reference_step(X, batch_indices, centers_ref, weight_ema_ref, 0.3, None)
+
+    steps = _emeans_steps if csr_container is None else _emeans_steps_sparse
+    args = (X, batch_indices, batch_size, centers, weight_ema, np.array([0.3]))
+    steps(*args, None, None, 0, 0, None, n_threads, **stats)
+
+    rtol = 1e-4 if dtype == np.float32 else 1e-9
+    for name in stats:
+        scale = np.abs(stats_ref[name]).max()
+        assert_allclose(stats[name], stats_ref[name], rtol=rtol, atol=rtol * scale)
+    # The center without rows keeps its axis, and its sums decay.
+    assert_array_equal(stats["axes"][0], axis_0)
+    assert stats["removal_cost"][0] == pytest.approx(0.7 * cost_0)
+    # The statistics don't change the step.
+    assert_allclose(centers, centers_ref, rtol=1e-5 if dtype == np.float32 else 1e-10)
+    assert_allclose(weight_ema, weight_ema_ref)
+
+
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+def test_emeans_steps_removal_stats_do_not_depend_on_n_threads(csr_container):
+    rng = np.random.RandomState(0)
+    n_samples, n_features, n_clusters, batch_size = 3000, 9, 40, 700
+    X = rng.normal(size=(n_samples, n_features)).astype(np.float32)
+    if csr_container is not None:
+        X[X < 0.5] = 0
+        X = csr_container(X)
+    steps = _emeans_steps if csr_container is None else _emeans_steps_sparse
+    rows = rng.permutation(n_samples).astype(np.intp)
+    step_sizes = np.linspace(0.5, 0.1, 5)
+
+    def run(n_threads):
+        rng = np.random.RandomState(1)
+        centers = rng.normal(size=(n_clusters, n_features)).astype(np.float32)
+        weight_ema = rng.uniform(size=n_clusters)
+        stats = _removal_stats(rng, n_clusters, n_features, np.float32)
+        steps(
+            X,
+            rows,
+            batch_size,
+            centers,
+            weight_ema,
+            step_sizes,
+            None,
+            None,
+            0,
+            0,
+            None,
+            n_threads,
+            **stats,
+        )
+        return [centers, weight_ema, *stats.values()]
+
+    for sequential, parallel in zip(run(1), run(4)):
+        assert_array_equal(sequential, parallel)
+
+
+def test_revive_cheap_clusters():
+    rng = np.random.RandomState(0)
+    centers = rng.uniform(1, 2, size=(5, 3)).astype(np.float32)
+    original_centers = centers.copy()
+    weight_ema = np.array([4.0, 1.0, 2.0, 0.0, 3.0])
+    # The median removal cost is 10: the clusters 3 then 1 are cheap.
+    removal_cost = np.array([10.0, 2.9, 12.0, 0.0, 40.0])
+    # The longest clusters are 4 then 0.
+    axis_sums = np.zeros((5, 3))
+    axis_sums[0, 0] = 8.0
+    axis_sums[2, 1] = 1.0
+    axis_sums[4, 2] = 27.0
+    axes = np.eye(3, dtype=np.float32)[[0, 0, 1, 0, 2]]
+    epoch_sums, epoch_counts = np.ones((5, 3)), np.ones(5)
+
+    n_revived = _revive_cheap_clusters(
+        centers, weight_ema, removal_cost, axis_sums, axes, epoch_sums, epoch_counts
+    )
+
+    assert n_revived == 2
+    # The two halves of the donor are at -/+ sqrt(2 ||U|| / (pi N)) u.
+    for cheap, donor, feature, norm, weight in [
+        (3, 4, 2, 27.0, 3.0),
+        (1, 0, 0, 8.0, 4.0),
+    ]:
+        offset = np.zeros(3)
+        offset[feature] = np.sqrt(2 * norm / (np.pi * weight))
+        assert_allclose(centers[cheap], original_centers[donor] + offset, rtol=1e-6)
+        assert_allclose(centers[donor], original_centers[donor] - offset, rtol=1e-6)
+        assert_array_equal(axes[cheap], axes[donor])
+    assert_array_equal(centers[2], original_centers[2])
+    assert_array_equal(weight_ema, [2.0, 2.0, 2.0, 1.5, 1.5])
+    assert_array_equal(removal_cost, [5.0, 5.0, 12.0, 20.0, 20.0])
+    # Along its axis, a half has the variance of a half-normal distribution.
+    half = 1 - 2 / np.pi
+    assert_allclose(
+        np.linalg.norm(axis_sums, axis=1),
+        [4.0 * half, 4.0 * half, 1.0, 13.5 * half, 13.5 * half],
+    )
+    # The two halves forget their rows of the last epoch.
+    assert_array_equal(epoch_counts, [0, 0, 1, 0, 0])
+    assert_array_equal(epoch_sums[:, 0], [0, 0, 1, 0, 0])
+
+
+def test_revive_cheap_clusters_no_cheap_or_no_donor():
+    centers = np.ones((3, 2))
+    axes = np.ones((3, 2))
+    for removal_cost in ([1.0, 1.0, 0.9], [0.0, 0.0, 0.0]):
+        n_revived = _revive_cheap_clusters(
+            centers, np.ones(3), np.array(removal_cost), np.ones((3, 2)), axes
+        )
+        assert n_revived == 0
+    assert_array_equal(centers, np.ones((3, 2)))
+
+
+def test_revive_cheap_clusters_null_axis_sums():
+    # Without an estimate of the variance, the two halves are next to each
+    # other.
+    centers = np.zeros((2, 3), dtype=np.float32)
+    _revive_cheap_clusters(
+        centers,
+        np.array([1.0, 0.0]),
+        np.array([1.0, 0.0]),
+        np.zeros((2, 3)),
+        np.ones((2, 3), dtype=np.float32),
+    )
+    assert not np.array_equal(centers[0], centers[1])
+    assert_allclose(centers, 0, atol=1e-30)
+
+
+@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
+@pytest.mark.parametrize("n_features", [2, 5])
+def test_emeans_cost_based_revival_revives_dead_clusters(csr_container, n_features):
+    # Half of the initial centers are far from the data and get no samples.
+    X, _ = make_blobs(n_samples=5000, n_features=n_features, centers=10, random_state=0)
+    init = X[:10].copy()
+    init[5:] += 1000
+    if csr_container is not None:
+        X = csr_container(X)
+    params = dict(n_clusters=10, init=init, random_state=0)
+    assert np.bincount(EMeans(revival=0, **params).fit(X).labels_).shape == (5,)
+    emeans = EMeans(revival="cost-based", **params).fit(X)
+    assert np.all(np.bincount(emeans.labels_, minlength=10) > 0)
+    if n_features > 2:
+        assert (
+            emeans.inertia_
+            < 1.2 * KMeans(n_clusters=10, random_state=0).fit(X).inertia_
+        )
+
+
+def test_emeans_cost_based_revival_does_not_depend_on_n_threads():
+    X, _ = make_blobs(n_samples=5000, n_features=20, centers=30, random_state=0)
+    emeans = EMeans(n_clusters=30, revival="cost-based", random_state=0)
+    with threadpool_limits(limits=1, user_api="openmp"):
+        centers_sequential = emeans.fit(X).cluster_centers_
+    centers_parallel = emeans.fit(X).cluster_centers_
+    assert_array_equal(centers_sequential, centers_parallel)
+
+
+@pytest.mark.parametrize(
+    "n_samples, n_epochs, n_steps, n_calls",
+    [
+        # A number of steps that is a multiple of 5: no revival after the last.
+        (3200, 1, 50, 9),
+        (3200, 1.5, 75, 14),
+        (3200, 5, 65, 12),
+        # The other ones: a revival every 5 steps.
+        (3000, 1.5, 71, 14),
+        (3000, 2, 48, 9),
+    ],
+)
+def test_emeans_cost_based_revival_not_after_last_step(
+    monkeypatch, n_samples, n_epochs, n_steps, n_calls
+):
+    # A cluster split after the last step would get no sample, and its two
+    # halves would end at the positions of the split.
+    calls = []
+
+    def revive(*args):
+        calls.append(None)
+        return 0
+
+    monkeypatch.setattr(_emeans, "_revive_cheap_clusters", revive)
+    X, _ = make_blobs(n_samples=n_samples, n_features=20, centers=10, random_state=0)
+    emeans = EMeans(
+        n_clusters=10, revival="cost-based", n_epochs=n_epochs, random_state=0
+    ).fit(X)
+    epochs_n_rows = _emeans._epochs_n_rows(n_samples, n_epochs)
+    assert n_steps == sum(
+        math.ceil(n_rows / emeans.batch_size_) for n_rows in epochs_n_rows
+    )
+    assert len(calls) == n_calls
+
+
+def test_emeans_cost_based_revival_one_cluster():
+    X, _ = make_blobs(n_samples=200, n_features=3, random_state=0)
+    emeans = EMeans(n_clusters=1, revival="cost-based", random_state=0).fit(X)
+    assert_allclose(emeans.cluster_centers_[0], X.mean(axis=0))
+
+
+def test_emeans_cost_based_revival_two_level_error():
+    X = np.zeros((10, 2))
+    with pytest.raises(ValueError, match="not supported with assignment='two-level'"):
+        EMeans(n_clusters=2, revival="cost-based", assignment="two-level").fit(X)
 
 
 @pytest.mark.parametrize("init", ["random", "k-means||"])

@@ -52,9 +52,15 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   data really has small clusters (e.g. outliers in heavy-tailed data), it may
   not reach the best clustering, and a lower value, 0 (no revival) or
   `"greedy"` do better. `"greedy"` replaces a cluster by half of another one
-  only when this is estimated to lower the inertia, for a longer fit. It is
-  experimental: its algorithm may change from one version to the next, and
-  its results with it.
+  only when this is estimated to lower the inertia, for a longer fit.
+  `"cost-based"` is the revival of
+  [faiss#5915](https://github.com/facebookresearch/faiss/pull/5915): it
+  replaces the clusters that are cheap to remove (their samples have another
+  center almost as close) by halves of the longest clusters, split along
+  their longest direction. It is only supported for NumPy arrays and sparse
+  matrices, with `assignment="exact"`. Both are experimental: their
+  algorithms may change from one version to the next, and their results with
+  them.
 - `assignment="two-level"` is experimental: its algorithm may change from one
   version to the next if improvements are found, and its results with it. It
   makes the fit much faster with many clusters, for an inertia that is

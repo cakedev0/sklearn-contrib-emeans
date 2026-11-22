@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 (mini-batch k-means with EMA centers, arXiv:2611.09501). The reference
 implementation is `faiss/contrib/e_means`: from the same initial centers and
 random numbers, `EMeans` must give the same centers as its `NumpyEmeans`, up to
-float32 rounding.
+float32 rounding. The only exceptions are the differences listed below for
+`revival="cost-based"`.
 
 ## Commands
 
@@ -77,6 +78,19 @@ cells follow the centers (`_refresh_cells`), then assigns the batch
 (`_search`). The pieces of work of each phase must not depend on the number of
 threads, since the rounding of a GEMM depends on its shape. The pure NumPy
 reference is in `tests/test_two_level.py`.
+
+`revival="cost-based"` (NumPy arrays and CSR matrices, exact assignment only)
+is the removal-cost revival of faiss#5915. The exact kernels take three more
+arrays (`removal_cost`, `axis_sums`, `axes`) and update them at each step
+(`_removal_update`), with the second nearest center of each row. The revival
+itself is `_revive_cheap_clusters` in `_emeans.py`. It follows `NumpyEmeans`
+with `capture_assignments=False` (the reassignment of the rows of the last
+epoch, `closing_handover`, is not implemented), with two differences. At
+a split, the axis sums of the two halves are scaled by
+`_HALF_NORMAL_VARIANCE`. And there is no revival after the last step of the
+fit, where the reference has one when the number of steps is a multiple of 5:
+the two halves of a split would get no row and keep the positions of the
+split. Without these two differences it gives the same centers.
 
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and

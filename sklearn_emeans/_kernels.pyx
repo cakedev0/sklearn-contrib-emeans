@@ -19,6 +19,9 @@ constructs, see `_run_steps`.
 `_labels_inertia` assigns all the samples with the same chunked GEMM, without
 the gather.
 
+For the cost-based revival, the steps also keep three statistics of each
+cluster: its removal cost, its axis sums and its axis, see `_removal_update`.
+
 The `_sparse` variants take a CSR matrix. Without a sparse BLAS, the assignment
 computes the dot products row by row against the transposed centers, so that
 each nonzero x_k adds -2 x_k c[:, k] to the distances of its row with one
@@ -47,7 +50,7 @@ from cpython.exc cimport PyErr_CheckSignals
 from cpython.pycapsule cimport PyCapsule_GetPointer, PyCapsule_IsValid
 from cpython.ref cimport PyObject
 from libc.float cimport DBL_MAX, FLT_MAX
-from libc.math cimport INFINITY
+from libc.math cimport INFINITY, isfinite, sqrt
 from libc.stdint cimport uint32_t, uint64_t
 from libc.stdlib cimport calloc, malloc, free
 from libc.string cimport memcpy, memset
@@ -317,6 +320,9 @@ def _emeans_steps(
     intp_t revival_period,
     revive,
     int n_threads,
+    double[::1] removal_cost=None,         # INOUT
+    double[:, ::1] axis_sums=None,         # INOUT
+    floating[:, ::1] axes=None,            # INOUT
 ):
     """Consecutive e-means steps on the rows `X[rows]`.
 
@@ -367,6 +373,20 @@ def _emeans_steps(
 
     n_threads : int
         The number of threads to be used by openmp.
+
+    removal_cost : ndarray of shape (n_clusters,), dtype=float64, default=None
+        EMA of the removal cost of each cluster. If not None, `axis_sums` and
+        `axes` must be given too: each step updates these three statistics of
+        the cost-based revival inplace, see `_removal_update`. It needs at
+        least 2 centers.
+
+    axis_sums : ndarray of shape (n_clusters, n_features), dtype=float64, \
+            default=None
+        EMA of the axis sums of each cluster.
+
+    axes : ndarray of shape (n_clusters, n_features), dtype=floating, \
+            default=None
+        Unit axis of each cluster.
     """
     if rows.shape[0] == 0:
         return
@@ -391,6 +411,9 @@ def _emeans_steps(
         revival_period,
         revive,
         n_threads,
+        NULL if removal_cost is None else &removal_cost[0],
+        NULL if removal_cost is None else &axis_sums[0, 0],
+        NULL if removal_cost is None else &axes[0, 0],
     )
 
 
@@ -479,6 +502,9 @@ def _emeans_steps_sparse(
     intp_t revival_period,
     revive,
     int n_threads,
+    double[::1] removal_cost=None,         # INOUT
+    double[:, ::1] axis_sums=None,         # INOUT
+    floating[:, ::1] axes=None,            # INOUT
 ):
     """Consecutive e-means steps on the CSR rows `X[rows]`.
 
@@ -513,6 +539,9 @@ def _emeans_steps_sparse(
         revival_period,
         revive,
         n_threads,
+        NULL if removal_cost is None else &removal_cost[0],
+        NULL if removal_cost is None else &axis_sums[0, 0],
+        NULL if removal_cost is None else &axes[0, 0],
     )
 
 
@@ -817,6 +846,9 @@ cdef int _run_steps(
     intp_t revival_period,
     object revive,
     int n_threads,
+    double *removal_cost,        # INOUT (n_clusters,), or NULL
+    double *axis_sums,           # INOUT (n_clusters, n_features), or NULL
+    floating *axes,              # INOUT (n_clusters, n_features), or NULL
 ) except -1:
     """Run consecutive steps in a single parallel region.
 
@@ -841,6 +873,7 @@ cdef int _run_steps(
     """
     cdef:
         bint is_sparse = X == NULL
+        bint with_removal = removal_cost != NULL
         intp_t max_batch_size = min(batch_size, n_rows)
         intp_t distances_size = n_clusters * (1 if is_sparse else CHUNK_SIZE)
         # Small enough to balance the threads when the centers have different
@@ -858,12 +891,18 @@ cdef int _run_steps(
             n_clusters * sizeof(floating)
         )
         floating *centers_T = NULL
+        # Gap of each batch row, in batch order then sorted by label.
+        double *gaps = NULL
+        double *sorted_gaps = NULL
         floating *X_chunk = NULL
         floating *distances = NULL
         double *sums = NULL
 
     if is_sparse:
         centers_T = <floating*> malloc(n_features * n_clusters * sizeof(floating))
+    if with_removal:
+        gaps = <double*> malloc(max_batch_size * sizeof(double))
+        sorted_gaps = <double*> malloc(max_batch_size * sizeof(double))
 
     if (
         labels == NULL
@@ -872,6 +911,7 @@ cdef int _run_steps(
         or counters == NULL
         or centers_squared_norms == NULL
         or (is_sparse and centers_T == NULL)
+        or (with_removal and (gaps == NULL or sorted_gaps == NULL))
     ):
         free(labels)
         free(cluster_starts)
@@ -879,13 +919,19 @@ cdef int _run_steps(
         free(counters)
         free(centers_squared_norms)
         free(centers_T)
+        free(gaps)
+        free(sorted_gaps)
         raise MemoryError()
 
     with nogil, parallel(num_threads=n_threads):
         if not is_sparse:
             X_chunk = <floating*> malloc(CHUNK_SIZE * n_features * sizeof(floating))
         distances = <floating*> malloc(distances_size * sizeof(floating))
-        sums = <double*> malloc(n_features * sizeof(double))
+        # With the removal statistics, the second half is for the axis sums of
+        # the batch.
+        sums = <double*> malloc(
+            (2 if with_removal else 1) * n_features * sizeof(double)
+        )
 
         if emeans_buffers_ready(
             &n_ready,
@@ -899,6 +945,7 @@ cdef int _run_steps(
                 <PyObject*> revive, <PyObject*> errors, &failed, counters,
                 block_size, labels, cluster_starts, batch_order,
                 centers_squared_norms, centers_T, X_chunk, distances, sums,
+                removal_cost, axis_sums, axes, gaps, sorted_gaps,
             )
 
         free(X_chunk)
@@ -911,6 +958,8 @@ cdef int _run_steps(
     free(counters)
     free(centers_squared_norms)
     free(centers_T)
+    free(gaps)
+    free(sorted_gaps)
 
     if errors:
         raise errors[0]
@@ -950,6 +999,11 @@ cdef void _steps_worker(
     floating *X_chunk,                # thread-local
     floating *distances,              # thread-local
     double *sums,                     # thread-local
+    double *removal_cost,             # shared (n_clusters,), or NULL
+    double *axis_sums,                # shared (n_clusters, n_features), or NULL
+    floating *axes,                   # shared (n_clusters, n_features), or NULL
+    double *gaps,                     # shared (batch_size,), or NULL
+    double *sorted_gaps,              # shared (batch_size,), or NULL
 ) noexcept nogil:
     """What each thread of `_run_steps` runs: the phases of all the steps.
 
@@ -958,12 +1012,14 @@ cdef void _steps_worker(
     """
     cdef:
         bint is_sparse = X == NULL
+        bint with_removal = removal_cost != NULL
         bint is_main_thread = emeans_omp_thread_num() == 0
         intp_t n_transpose_blocks = (
             (n_features + TRANSPOSE_BLOCK_SIZE - 1) // TRANSPOSE_BLOCK_SIZE
         )
         intp_t s, n_batch, n_chunks, chunk_idx, start, n_chunk_rows, r, j
-        intp_t block_idx, first, last
+        intp_t block_idx, first, last, n_members
+        double *axis_batch = sums + n_features
         const intp_t *batch
         intp_t *counter
 
@@ -1017,7 +1073,14 @@ cdef void _steps_worker(
                 break
             start = chunk_idx * CHUNK_SIZE
             n_chunk_rows = min(CHUNK_SIZE, n_batch - start)
-            if is_sparse:
+            if is_sparse and with_removal:
+                for r in range(start, start + n_chunk_rows):
+                    _sparse_row_distances(
+                        X_data, X_indices, X_indptr, batch[r], centers_T,
+                        centers_squared_norms, n_clusters, distances,
+                    )
+                    _two_nearest(distances, n_clusters, &labels[r], &gaps[r])
+            elif is_sparse:
                 _assign_rows_sparse(
                     X_data, X_indices, X_indptr, batch + start, 0, n_chunk_rows,
                     centers_T, centers_squared_norms, NULL, n_clusters,
@@ -1028,17 +1091,24 @@ cdef void _steps_worker(
                     memcpy(&X_chunk[r * n_features],
                            &X[batch[start + r] * n_features],
                            n_features * sizeof(floating))
-                _assign_rows(
-                    X_chunk, n_chunk_rows, centers, centers_squared_norms,
-                    n_clusters, n_features, labels + start, distances, NULL,
-                )
+                if with_removal:
+                    _two_nearest_rows(
+                        X_chunk, n_chunk_rows, centers, centers_squared_norms,
+                        n_clusters, n_features, labels + start, distances,
+                        gaps + start,
+                    )
+                else:
+                    _assign_rows(
+                        X_chunk, n_chunk_rows, centers, centers_squared_norms,
+                        n_clusters, n_features, labels + start, distances, NULL,
+                    )
             emeans_fetch_add(&counter[ASSIGN + 1], 1)
         emeans_wait(&counter[ASSIGN + 1], n_chunks)
 
         # Sort of the batch rows by label, by the first thread to get here.
         if emeans_fetch_add(&counter[SORT], 1) == 0:
             _sort_by_label(batch, labels, n_batch, n_clusters, cluster_starts,
-                           batch_order)
+                           batch_order, gaps, sorted_gaps)
             emeans_fetch_add(&counter[SORT + 1], 1)
         emeans_wait(&counter[SORT + 1], 1)
 
@@ -1049,6 +1119,29 @@ cdef void _steps_worker(
                 break
             last = min(first + block_size, n_clusters)
             for j in range(first, last):
+                if with_removal:
+                    # Before the update of the center: the statistics are
+                    # relative to the center that the rows were assigned to.
+                    n_members = cluster_starts[j + 1] - cluster_starts[j]
+                    if n_members > 0 and is_sparse:
+                        _axis_batch_sparse(
+                            X_data, X_indices, X_indptr,
+                            batch_order + cluster_starts[j], n_members,
+                            n_features, centers + j * n_features,
+                            axes + j * n_features, axis_batch,
+                        )
+                    elif n_members > 0:
+                        _axis_batch(
+                            X, batch_order + cluster_starts[j], n_members,
+                            n_features, centers + j * n_features,
+                            axes + j * n_features, axis_batch,
+                        )
+                    _removal_update(
+                        &removal_cost[j], axis_sums + j * n_features,
+                        axes + j * n_features, axis_batch,
+                        sorted_gaps + cluster_starts[j], n_members,
+                        step_sizes[s], n_features,
+                    )
                 if is_sparse:
                     _update_center_sparse(
                         X_data, X_indices, X_indptr,
@@ -1309,11 +1402,15 @@ cdef void _sort_by_label(
     intp_t n_clusters,
     intp_t *cluster_starts,       # OUT (n_clusters + 1,)
     intp_t *batch_order,          # OUT (n_batch,)
+    const double *values,         # IN (n_batch,), or NULL
+    double *sorted_values,        # OUT (n_batch,), or NULL
 ) noexcept nogil:
     """Counting sort of the batch rows by label.
 
     The rows assigned to center j are
     `batch_order[cluster_starts[j]:cluster_starts[j + 1]]`, in batch order.
+    If `values` is not NULL, `sorted_values` gets the value of each batch row
+    in the same order.
     """
     cdef intp_t p, j
 
@@ -1327,6 +1424,8 @@ cdef void _sort_by_label(
     # j. It ends at the start of center j + 1, so shift it back afterwards.
     for p in range(n_batch):
         batch_order[cluster_starts[labels[p]]] = batch_indices[p]
+        if values != NULL:
+            sorted_values[cluster_starts[labels[p]]] = values[p]
         cluster_starts[labels[p]] += 1
     for j in range(n_clusters, 0, -1):
         cluster_starts[j] = cluster_starts[j - 1]
@@ -1389,6 +1488,117 @@ cdef void _update_center_sparse(
 
     _ema_update(center, weight_ema, sums, n_members, step_size, epoch_sum,
                 epoch_count, n_features)
+
+
+cdef void _axis_batch(
+    const floating *X,       # IN (n_samples, n_features)
+    const intp_t *members,   # IN (n_members,)
+    intp_t n_members,
+    intp_t n_features,
+    const floating *center,  # IN (n_features,)
+    const floating *axis,    # IN (n_features,)
+    double *axis_batch,      # OUT (n_features,)
+) noexcept nogil:
+    """Axis sums of one center over its batch rows `X[members]`.
+
+    The sum of p y over the rows x, with y = x - center and p = <y, axis>,
+    computed as sum(p x) - sum(p) center.
+    """
+    cdef:
+        intp_t m, k
+        const floating *x
+        double p, center_p = 0.0, total_p = 0.0
+
+    memset(axis_batch, 0, n_features * sizeof(double))
+    for k in range(n_features):
+        center_p += <double> center[k] * axis[k]
+    for m in range(n_members):
+        x = &X[members[m] * n_features]
+        p = -center_p
+        for k in range(n_features):
+            p += <double> x[k] * axis[k]
+        total_p += p
+        for k in range(n_features):
+            axis_batch[k] += p * x[k]
+    for k in range(n_features):
+        axis_batch[k] -= total_p * center[k]
+
+
+cdef void _axis_batch_sparse(
+    const floating *X_data,  # IN (nnz,)
+    const int *X_indices,    # IN (nnz,)
+    const int *X_indptr,     # IN (n_samples + 1,)
+    const intp_t *members,   # IN (n_members,)
+    intp_t n_members,
+    intp_t n_features,
+    const floating *center,  # IN (n_features,)
+    const floating *axis,    # IN (n_features,)
+    double *axis_batch,      # OUT (n_features,)
+) noexcept nogil:
+    """`_axis_batch` of the CSR rows `X[members]`."""
+    cdef:
+        intp_t m, i, k, q
+        double p, center_p = 0.0, total_p = 0.0
+
+    memset(axis_batch, 0, n_features * sizeof(double))
+    for k in range(n_features):
+        center_p += <double> center[k] * axis[k]
+    for m in range(n_members):
+        i = members[m]
+        p = -center_p
+        for q in range(X_indptr[i], X_indptr[i + 1]):
+            p += <double> X_data[q] * axis[X_indices[q]]
+        total_p += p
+        for q in range(X_indptr[i], X_indptr[i + 1]):
+            axis_batch[X_indices[q]] += p * X_data[q]
+    for k in range(n_features):
+        axis_batch[k] -= total_p * center[k]
+
+
+cdef inline void _removal_update(
+    double *removal_cost,      # INOUT
+    double *axis_sum,          # INOUT (n_features,)
+    floating *axis,            # INOUT (n_features,)
+    const double *axis_batch,  # IN (n_features,), unused if n_members == 0
+    const double *gaps,        # IN (n_members,)
+    intp_t n_members,
+    double step_size,
+    intp_t n_features,
+) noexcept nogil:
+    """Update of the statistics of one center for the cost-based revival.
+
+    They are EMAs with step alpha, as the weight N_j of the center:
+    - the removal cost R_j, of the sum over its batch rows of their gap: how
+      much further their second nearest center is, in squared distance. It
+      estimates how much the inertia of a batch would grow without this
+      center.
+    - the axis sums U_j, of the sum of <y, u_j> y over its batch rows x, with
+      y = x - c_j. The axis u_j = U_j / ||U_j|| then follows the direction in
+      which the cluster is the longest (Oja's rule), where ||U_j|| / N_j
+      estimates its variance. The axis only changes when the center gets rows.
+    """
+    cdef:
+        intp_t m, k
+        double decay = 1.0 - step_size
+        double gap_sum = 0.0, squared_norm = 0.0, norm
+
+    for m in range(n_members):
+        if isfinite(gaps[m]):
+            gap_sum += gaps[m]
+    removal_cost[0] = decay * removal_cost[0] + step_size * gap_sum
+
+    if n_members == 0:
+        for k in range(n_features):
+            axis_sum[k] *= decay
+        return
+
+    for k in range(n_features):
+        axis_sum[k] = decay * axis_sum[k] + step_size * axis_batch[k]
+        squared_norm += axis_sum[k] * axis_sum[k]
+    norm = sqrt(squared_norm)
+    if norm > 0:
+        for k in range(n_features):
+            axis[k] = <floating> (axis_sum[k] / norm)
 
 
 cdef inline void _ema_update(

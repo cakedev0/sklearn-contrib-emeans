@@ -9,7 +9,7 @@ From these runs:
 - A k-means|| init still seems useful on top of it: 0.5 to 4% lower inertia on the road network, Census and household power.
 - One thing that may be worth a look: on KDD and Shuttle, many final centroids are nearest to no training row (~320 of 4096 on KDD, on CPU and GPU).
 
-I didn't dig into it. Details below (with a slow case of `faiss.knn` with k=2 on CPU), and I can run more cases if that helps.
+I didn't dig into it. Details below, and I can run more cases if that helps.
 
 <details><summary>Details (from my agent)</summary>
 
@@ -57,7 +57,7 @@ The held-out error of Shuttle depends on one test row far from all the training 
 | --- | --- | --- | --- | --- |
 | 64 | 1.27 (1.10 to 1.37) | 1.27 (1.07 to 3.35) | 1.11 (1.03 to 1.18) | 2.1 (1.1 to 3.6) |
 | 256 | 1.32 (1.15 to 1.54) | 1.32 (1.10 to 1.76) | 1.19 (0.94 to 1.62) | 1.3 (1.0 to 4.5) |
-| 1024 | 1.41 (0.97 to 1.54, and 12 in the slow case below) | 1.22 (1.03 to 2.10) | 1.24 (0.93 to 1.52) | 2.4 (1.1 to 13) |
+| 1024 | 1.41 (0.97 to 1.54) | 1.22 (1.03 to 2.10) | 1.24 (0.93 to 1.52) | 2.4 (1.1 to 13) |
 | 4096 | 1.50 (0.89 to 1.58) | 2.22 (1.74 to 3.16) | 1.24 (1.19 to 1.33) | 18 (11 to 32) |
 
 The GPU columns for faiss are `Emeans` with BF16 operands on both sides. The cost-based rule adds work to every step (top-2 instead of top-1, and statistics in O(batch x d)), so its ratio doesn't depend on the size. Greedy adds 5 to 15 revivals per fit, each an exact assignment of a sample of max(131072, 256 k) rows on the host: almost free when the data is much larger than the sample (+0.2 s on SUSY at k=1024 on CPU), about one more fit at k=4096 on CPU (+6 s on Census and KDD), and quadratic in k. On GPU it dominates the fit, since it runs on the 8 vCPUs of the VM (Census, k=4096, 5 epochs: 21 s against 1.9 s).
@@ -77,39 +77,5 @@ The GPU columns for faiss are `Emeans` with BF16 operands on both sides. The cos
 
 On the other six datasets it is 0, or a handful at k=4096 on GeoNames. I don't know if these centroids are duplicates or centroids that the closing pass left at their running position.
 
------
-
-**On CPU, the top-2 search has a slow case in low dimension.** With 65,536 queries, 1024 centroids and d=3, `faiss.knn(x, c, 2)` takes 75 ms against 0.8 ms for `k=1`. With 32,768 queries there is no gap:
-
-```python
-import time, numpy as np, faiss
-
-rng = np.random.RandomState(0)
-for d in (3, 18):
-    c = rng.rand(1024, d).astype("float32")
-    for nq in (32768, 65536):
-        x = rng.rand(nq, d).astype("float32")
-        for k in (1, 2):
-            faiss.knn(x, c, k)
-            t = time.perf_counter()
-            for _ in range(5):
-                faiss.knn(x, c, k)
-            print(
-                f"d={d} nq={nq} top-{k}: {(time.perf_counter() - t) / 5 * 1e3:.1f} ms"
-            )
-```
-
-```
-d=3 nq=32768 top-1: 6.4 ms
-d=3 nq=32768 top-2: 4.9 ms
-d=3 nq=65536 top-1: 0.8 ms
-d=3 nq=65536 top-2: 75.1 ms
-d=18 nq=32768 top-1: 16.2 ms
-d=18 nq=32768 top-2: 20.1 ms
-d=18 nq=65536 top-1: 25.5 ms
-d=18 nq=65536 top-2: 56.2 ms
-```
-
-On the road network at k=1024, the batch is 32,768 rows with 5 epochs and 65,536 with 10. The cost-based fit then takes 5.4 s with 5 epochs and 45 s with 10, against 3.6 s for `unused_threshold=0.1` with 10. I didn't look at which code path each case takes. This is specific to `faiss.knn` on CPU: on GPU (Triton), the same case (batch of 65,536, k=1024, d=3) takes 0.41 s with the cost-based rule against 0.33 s with the mass-based one, and no case is above 1.6x.
-
 </details>
+

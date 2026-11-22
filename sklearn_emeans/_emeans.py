@@ -59,6 +59,11 @@ _DEAD_CLUSTER_THRESHOLD = 0.1
 # cost is below this fraction of the median over the clusters.
 _REMOVAL_COST_THRESHOLD = 0.3
 
+# revival="cost-based": variance of a half-normal distribution, relative to the
+# normal one. A half of a split cluster keeps this fraction of the variance of
+# the cluster along its axis.
+_HALF_NORMAL_VARIANCE = 1 - 2 / math.pi
+
 # Relative perturbation of the two halves of a split donor center.
 _SPLIT_EPSILON = 1e-4
 
@@ -410,7 +415,9 @@ def _revive_cheap_clusters(
     with the largest norm of the axis sums first. The two halves of a donor
     are at its center -/+ s u, where u is its axis and s the mean of a
     half-normal distribution that has the variance of the cluster along its
-    axis, estimated as ||U|| / N. They share its weight and its statistics.
+    axis, estimated as ||U|| / N. They share its weight and its statistics,
+    and their axis sums are scaled by `_HALF_NORMAL_VARIANCE`, the variance
+    that is left along the axis in each half.
 
     In the last epoch, `epoch_sums` and `epoch_counts` are given: the two
     halves forget the rows of the epoch that they got before the split, so
@@ -438,6 +445,13 @@ def _revive_cheap_clusters(
 
     for stats in (weight_ema, removal_cost, axis_sums):
         stats[donor_indices] /= 2
+    # This differs from the reference implementation, where the halves keep
+    # the variance of the whole cluster along its axis. They then stay among
+    # the longest clusters and are split again with the same offset, before
+    # their axis sums follow their own rows. On heavy-tailed data (KDD Cup 99,
+    # Shuttle), this leaves many centers far from all the samples.
+    axis_sums[donor_indices] *= _HALF_NORMAL_VARIANCE
+    for stats in (weight_ema, removal_cost, axis_sums):
         stats[cheap_indices] = stats[donor_indices]
     axes[cheap_indices] = axes[donor_indices]
     if epoch_sums is not None:
@@ -556,8 +570,10 @@ class EMeans(
         it got after its last split. This revival also applies when
         `n_features <= 2`. It is the default one of the reference
         implementation since `pull request 5915 of faiss
-        <https://github.com/facebookresearch/faiss/pull/5915>`_, without its
-        reassignment of the samples of the last epoch. It is only supported
+        <https://github.com/facebookresearch/faiss/pull/5915>`_, with two
+        differences: the samples of the last epoch are not reassigned, and
+        the two halves of a split cluster are not as long as the cluster was,
+        so that they are not split again right away. It is only supported
         for NumPy arrays and sparse matrices, with `assignment='exact'`.
 
         .. warning::

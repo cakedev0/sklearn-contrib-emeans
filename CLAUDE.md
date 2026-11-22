@@ -82,9 +82,11 @@ reference is in `tests/test_two_level.py`.
 is the removal-cost revival of faiss#5915. The exact kernels take three more
 arrays (`removal_cost`, `axis_sums`, `axes`) and update them at each step
 (`_removal_update`), with the second nearest center of each row. The revival
-itself is `_revive_cheap_clusters` in `_emeans.py`. It matches `NumpyEmeans`
-with `capture_assignments=False`: the reassignment of the rows of the last
-epoch (`closing_handover`) is not implemented.
+itself is `_revive_cheap_clusters` in `_emeans.py`. It follows `NumpyEmeans`
+with `capture_assignments=False` (the reassignment of the rows of the last
+epoch, `closing_handover`, is not implemented), with one difference: at
+a split, the axis sums of the two halves are scaled by
+`_HALF_NORMAL_VARIANCE`. Without this scaling it gives the same centers.
 
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and

@@ -85,9 +85,11 @@ revival of faiss#5915. The exact and two-level kernels take three more arrays
 two-level assignment, it is the second nearest of the centers of the probed
 cells, or the coarse center of the second nearest cell for a row that probes
 a single center (`_search`). The revival itself is `_revive_cheap_clusters`
-in `_emeans.py`. It matches `NumpyEmeans` with `capture_assignments=False`:
-the reassignment of the rows of the last epoch (`closing_handover`) is not
-implemented.
+in `_emeans.py`. It follows `NumpyEmeans` with `capture_assignments=False`
+(the reassignment of the rows of the last epoch, `closing_handover`, is not
+implemented), with one difference: at a split, the axis sums of the two
+halves are scaled by `_HALF_NORMAL_VARIANCE`. Without this scaling it gives
+the same centers.
 
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and

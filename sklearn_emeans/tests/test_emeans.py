@@ -572,7 +572,12 @@ def test_revive_cheap_clusters():
     assert_array_equal(centers[2], original_centers[2])
     assert_array_equal(weight_ema, [2.0, 2.0, 2.0, 1.5, 1.5])
     assert_array_equal(removal_cost, [5.0, 5.0, 12.0, 20.0, 20.0])
-    assert_array_equal(np.linalg.norm(axis_sums, axis=1), [4.0, 4.0, 1.0, 13.5, 13.5])
+    # Along its axis, a half has the variance of a half-normal distribution.
+    half = 1 - 2 / np.pi
+    assert_allclose(
+        np.linalg.norm(axis_sums, axis=1),
+        [4.0 * half, 4.0 * half, 1.0, 13.5 * half, 13.5 * half],
+    )
     # The two halves forget their rows of the last epoch.
     assert_array_equal(epoch_counts, [0, 0, 1, 0, 0])
     assert_array_equal(epoch_sums[:, 0], [0, 0, 1, 0, 0])

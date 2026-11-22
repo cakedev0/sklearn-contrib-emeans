@@ -1,8 +1,54 @@
-Thanks for this PR! I compared the cost-based revival (at ba7781a, `NumpyEmeans`) with the mass-based one and with the revivals of [sklearn-contrib-emeans](https://github.com/cakedev0/sklearn-contrib-emeans) on 8 datasets (3 seeds, 2 to 10 epochs, Core Ultra 9 285 with 24 threads). The benchmarks were run by my agent (Claude). Scripts, raw runs and tables are [here](https://github.com/cakedev0/sklearn-contrib-emeans/tree/h-means-bench/research/faiss-cost-based-revival).
+Thanks for this PR! I had my agent benchmark the cost-based revival (`NumpyEmeans` at ba7781a) against the mass-based one, and against the `revival="greedy"` of [sklearn-contrib-emeans](https://github.com/cakedev0/sklearn-contrib-emeans), which is built on the same idea (removal cost against split gain) but estimates both on a sample, with trial 2-means splits. 8 datasets, 3 seeds, CPU only.
 
-**The cost-based rule removes the gap of the mass-based one** on every dataset where there is one: 16-18% of training inertia on a 3-D road network (4.3M rows), 2% on YearPredictionMSD, 5% on Census, ~40% on household power, more than 100% on GeoNames. On KDD Cup 99 at k=1024 (5 epochs), the held-out error goes from 11.0 to 0.53.
+From these runs:
 
-Two things I noticed on the way:
+- The cost-based rule seems to remove most of the gap that the mass-based revival leaves (16-18% of inertia on a 3-D road network), and it ends within ~1% of greedy on most datasets. It looks better than greedy on KDD Cup 99 up to k=1024, and worse at k=4096.
+- A k-means|| init still seems useful on top of it: 0.5 to 4% lower inertia on the road network, Census and household power.
+- Two things that may be worth a look: the top-2 search is very slow in one low-dimension case (75 ms against 0.8 ms for top-1), and on KDD and Shuttle many final centroids are nearest to no training row (~320 of 4096 on KDD).
+
+I didn't dig into these two. Details below, and I can run more cases if that helps.
+
+<details><summary>Details (from my agent)</summary>
+
+Setup: faiss built at ba7781a, sklearn-contrib-emeans 0.4.1, Core Ultra 9 285 (24 threads), seeds 0 to 2, random init unless stated. The inertia is recomputed from the returned centroids in float64 with an exact assignment. Scripts, raw runs and all the tables are [here](https://github.com/cakedev0/sklearn-contrib-emeans/tree/h-means-bench/research/faiss-cost-based-revival).
+
+Datasets: `road_network_km_x10` (4.3M x 3), YearPredictionMSD standardized (515k x 90) and SUSY (5M x 18) from a k-means benchmark of ours, and KDD Cup 99, Census, GeoNames, household power and Shuttle prepared with the script of [eyal-weiss/emeans-net-gain-revival](https://github.com/eyal-weiss/emeans-net-gain-revival) (duplicates removed, 20,000 rows held out, z-score).
+
+-----
+
+**Comparison.** Training inertia, % above the best variant of the row, mean of 3 seeds, longest budget (10 epochs for the first three datasets, 5 for the others). "km||" is the k-means|| init of sklearn-contrib-emeans, passed as `init_centroids` for the faiss columns.
+
+| dataset, k | faiss mass 0.1 | faiss cost-based | faiss cost-based, km\|\| | greedy | greedy, km\|\| |
+| --- | --- | --- | --- | --- | --- |
+| road network, 64 | 11.3 | 1.3 | 0.5 | 1.2 | 0 |
+| road network, 256 | 13.7 | 1.2 | 0 | 0.4 | 0 |
+| road network, 1024 | 16.6 | 0.3 | 0 | 0.5 | 0.4 |
+| MSD, 256 | 1.3 | 0.1 | 0 | 0.1 | 0 |
+| MSD, 1024 | 2.2 | 0.1 | 0 | 0.4 | 0.4 |
+| SUSY, 64 | 0.6 | 0.6 | 0.1 | 0.2 | 0.1 |
+| SUSY, 1024 | 0.6 | 0.3 | 0 | 0 | 0 |
+| Census, 1024 | 5.6 | 1.4 | 0.4 | 0.3 | 0 |
+| Census, 4096 | 5.5 | 0.7 | 0.1 | 0.1 | 0 |
+| GeoNames, 1024 | 104 | 0.8 | 0 | 0.4 | 0.1 |
+| GeoNames, 4096 | 143 | 1.2 | 1.2 | 0.7 | 0 |
+| power, 256 | 37.0 | 3.5 | 0 | 0.4 | 0 |
+| power, 1024 | 43.0 | 4.2 | 0 | 0.7 | 0 |
+
+KDD Cup 99 and Shuttle are heavy-tailed, so here are the raw values (5 epochs, mean of 3 seeds):
+
+| | faiss mass 0.1 | faiss cost-based | faiss cost-based, km\|\| | greedy | greedy, km\|\| |
+| --- | --- | --- | --- | --- | --- |
+| KDD k=256, held-out error | 32.1 | 1.68 | 1.69 | 2.29 | 1.64 |
+| KDD k=1024, held-out error | 11.0 | 0.53 | 0.51 | 0.81 | 0.63 |
+| KDD k=4096, held-out error | 1.19 | 0.255 | 0.257 | 0.293 | 0.235 |
+| KDD k=4096, training inertia | 13.3 | 0.85 | 0.82 | 0.30 | 0.097 |
+| Shuttle k=1024, training inertia | 0.375 | 0.017 | 0.020 | 0.110 | 0.0098 |
+
+The held-out error of Shuttle depends on one test row far from all the training rows, so I left it out. On KDD at k=4096, the training inertia of the cost-based rule changes a lot with the seed (1.18, 1.17 and 0.19).
+
+**k-means|| on top of the cost-based rule.** In the first table, the k-means|| start lowers the inertia of the cost-based fits by 0.5 to 4% on the road network, Census, household power and SUSY at k=64, and changes little on MSD and KDD. So the cost-based rule recovers most of a bad random start, not all of it.
+
+**Fit time of the rule.** The cost-based fits take 1.2 to 1.6 times the mass-based ones in `NumpyEmeans` (for example 5.8 s against 4.4 s on the road network at k=64 with 10 epochs), apart from the slow case below.
 
 -----
 
@@ -39,15 +85,15 @@ On the road network at k=1024, the batch is 32,768 rows with 5 epochs and 65,536
 
 -----
 
-**On KDD Cup 99 and Shuttle, many final centroids are nearest to no training row.** I assign the training rows to the returned centroids (exact search) and count the centroids that get none, mean of 3 seeds, 5 epochs:
+**On KDD Cup 99 and Shuttle, many final centroids are nearest to no training row.** The training rows are assigned to the returned centroids (exact search) and the centroids that get none are counted. Mean of 3 seeds, 5 epochs:
 
 | | cost-based | `unused_threshold=0.1` |
 | --- | --- | --- |
-| KDD (deduplicated, z-scored, 1.05M x 122), k=1024 | 45 | 3 |
+| KDD (1.05M x 122), k=1024 | 45 | 3 |
 | KDD, k=4096 | 318 | 5 |
 | Shuttle (38k x 9), k=256 | 34 | 0 |
 | Shuttle, k=1024 | 258 | 1 |
 
-On the other six datasets it is 0, or a handful at k=4096 on GeoNames. On KDD at k=4096 the training inertia also changes a lot with the seed (1.18, 1.17 and 0.19 with 5 epochs), while the held-out error is stable (0.255). I don't know if these centroids are duplicates or centroids that the closing pass left at their running position.
+On the other six datasets it is 0, or a handful at k=4096 on GeoNames. I don't know if these centroids are duplicates or centroids that the closing pass left at their running position.
 
-Let me know if more details on a case would help.
+</details>

@@ -375,10 +375,10 @@ def _emeans_steps(
         The number of threads to be used by openmp.
 
     removal_cost : ndarray of shape (n_clusters,), dtype=float64, default=None
-        If not None, the statistics of the cost-based revival are updated
-        inplace by each step: `removal_cost`, `axis_sums` and `axes`, see
-        `_removal_update`. It needs at least 2 centers. EMA of the removal
-        cost of each cluster.
+        EMA of the removal cost of each cluster. If not None, `axis_sums` and
+        `axes` must be given too: each step updates these three statistics of
+        the cost-based revival inplace, see `_removal_update`. It needs at
+        least 2 centers.
 
     axis_sums : ndarray of shape (n_clusters, n_features), dtype=float64, \
             default=None

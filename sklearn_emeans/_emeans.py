@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import ctypes
+import itertools
 import math
 import os
 import re
@@ -461,6 +462,20 @@ def _revive_cheap_clusters(
     return len(cheap_indices)
 
 
+def _without_call(function, skipped):
+    """`function` with no argument, whose call number `skipped` does nothing.
+
+    The calls are counted from 1.
+    """
+    calls = itertools.count(1)
+
+    def wrapper():
+        if next(calls) != skipped:
+            function()
+
+    return wrapper
+
+
 def _cost_based_revival_indices(removal_cost, weight_ema, axis_sums):
     """Indices of the cheap clusters to move and of their donors, or None."""
     cheap = (removal_cost <= 0) | (
@@ -570,10 +585,11 @@ class EMeans(
         it got after its last split. This revival also applies when
         `n_features <= 2`. It is the default one of the reference
         implementation since `pull request 5915 of faiss
-        <https://github.com/facebookresearch/faiss/pull/5915>`_, with two
-        differences: the samples of the last epoch are not reassigned, and
-        the two halves of a split cluster are not as long as the cluster was,
-        so that they are not split again right away. It is only supported
+        <https://github.com/facebookresearch/faiss/pull/5915>`_, with three
+        differences: the samples of the last epoch are not reassigned, there
+        is no revival after the last step, and the two halves of a split
+        cluster are not as long as the cluster was, so that they are not
+        split again right away. It is only supported
         for NumPy arrays and sparse matrices, with `assignment='exact'`.
 
         .. warning::
@@ -1004,6 +1020,14 @@ class EMeans(
                         epoch_sums if is_last_epoch else None,
                         epoch_counts if is_last_epoch else None,
                     )
+                    if is_last_epoch and n_steps % revival_period == 0:
+                        # No revival after the last step: the two halves of
+                        # a split would get no row, and end at the center of
+                        # their cluster -/+ the offset of the split. This
+                        # differs from the reference implementation.
+                        revive = _without_call(
+                            revive, n_steps // revival_period - step // revival_period
+                        )
                 # All the steps of the epoch in one call, which revives the
                 # dead clusters every `revival_period` steps: see `_run_steps`
                 # in `_kernels.pyx`. The greedy revival runs between two

@@ -5,9 +5,9 @@ From these runs:
 - The cost-based rule seems to remove most of the gap that the mass-based revival leaves (16-18% of inertia on a 3-D road network), and it ends within ~1% of greedy on most datasets. It looks better than greedy on KDD Cup 99 up to k=1024, and worse at k=4096.
 - It also scales better: on GPU it adds 10 to 25% to the fit time at any k (30 to 50% in `NumpyEmeans`), while greedy is quadratic in k and runs on the host (~2x the fit time at k=4096 on CPU, much more on GPU). So I think the cost-based approach is the better one.
 - A k-means|| init still seems useful on top of it: 0.5 to 4% lower inertia on the road network, Census and household power.
-- Two things that may be worth a look: on KDD and Shuttle many final centroids are nearest to no training row (~320 of 4096 on KDD, on GPU too), and on CPU only, `faiss.knn` with k=2 is very slow in one low-dimension case (75 ms against 0.8 ms for k=1).
+- One thing that may be worth a look: on KDD and Shuttle, many final centroids are nearest to no training row (~320 of 4096 on KDD, on CPU and GPU).
 
-I didn't dig into these two. Details below, and I can run more cases if that helps.
+I didn't dig into it. Details below (with a slow case of `faiss.knn` with k=2 on CPU), and I can run more cases if that helps.
 
 <details><summary>Details (from my agent)</summary>
 

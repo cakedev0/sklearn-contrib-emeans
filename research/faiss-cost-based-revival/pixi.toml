@@ -1,0 +1,26 @@
+[workspace]
+name = "faiss-pr5915"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.13.*"
+numpy = "*"
+scipy = "*"
+scikit-learn = "*"
+pyarrow = "*"
+pandas = "*"
+threadpoolctl = "*"
+cmake = "*"
+ninja = "*"
+swig = "*"
+cxx-compiler = "*"
+c-compiler = "*"
+libopenblas = { version = "*", build = "*pthreads*" }
+openblas = "*"
+setuptools = "*"
+pip = "*"
+packaging = "*"
+
+[pypi-dependencies]
+sklearn-contrib-emeans = ">=0.4.0"

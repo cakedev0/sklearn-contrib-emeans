@@ -2350,6 +2350,11 @@ cdef void _trial_split_sparse(
 # compared to the rows that probe it with one GEMM per chunk of pairs
 # (`_search`). The chunks don't depend on the number of threads, and neither
 # does the result.
+#
+# For the cost-based revival, the second nearest center of a row is the second
+# nearest of the centers of the cells it probes. When the row probes a single
+# center, the coarse center of its second nearest cell stands for it:
+# otherwise a center alone in its cell would look free to remove.
 
 # Number of rows compared to the coarse centers by one GEMM, and number of
 # (row, cell) pairs of a cell compared to its centers by one GEMM. These GEMMs
@@ -2552,6 +2557,9 @@ def _emeans_steps_two_level(
     int[::1] cell_of_center,               # INOUT
     intp_t max_probes,
     double ratio,
+    double[::1] removal_cost=None,         # INOUT
+    double[:, ::1] axis_sums=None,         # INOUT
+    floating[:, ::1] axes=None,            # INOUT
 ):
     """Consecutive e-means steps on the rows `X[rows]`, two-level assignment.
 
@@ -2575,9 +2583,15 @@ def _emeans_steps_two_level(
         A cell is probed by a row when its squared distance to the row is at
         most `ratio**2` times the one of the nearest cell. `inf` to always
         probe the `max_probes` nearest cells.
+
+    removal_cost, axis_sums, axes : ndarray, default=None
+        The statistics of the cost-based revival, as in `_emeans_steps`. The
+        second nearest center of a row is the one of the centers of the cells
+        it probes.
     """
     cdef:
         TwoLevel tl
+        bint with_removal = removal_cost is not None
         intp_t n_rows = rows.shape[0]
         intp_t n_clusters = centers.shape[0]
         intp_t n_features = centers.shape[1]
@@ -2599,6 +2613,13 @@ def _emeans_steps_two_level(
         floating *sorted_centers
         floating *sorted_squared_norms
         floating *pair_distances
+        # With the removal statistics: second nearest center of each pair,
+        # coarse distance of the second nearest cell of each row, and gap of
+        # each batch row, in batch order then sorted by center.
+        floating *pair_seconds = NULL
+        floating *second_cells = NULL
+        double *gaps = NULL
+        double *sorted_gaps = NULL
         floating *X_chunk = NULL
         floating *distances = NULL
         int *chunk_labels = NULL
@@ -2623,6 +2644,13 @@ def _emeans_steps_two_level(
         max_batch_size * tl.max_probes * sizeof(floating)
     )
     allocated = _two_level_alloc(&tl, max_batch_size)
+    if with_removal:
+        pair_seconds = <floating*> malloc(
+            max_batch_size * tl.max_probes * sizeof(floating)
+        )
+        second_cells = <floating*> malloc(max_batch_size * sizeof(floating))
+        gaps = <double*> malloc(max_batch_size * sizeof(double))
+        sorted_gaps = <double*> malloc(max_batch_size * sizeof(double))
 
     if (
         not allocated
@@ -2635,6 +2663,15 @@ def _emeans_steps_two_level(
         or sorted_centers == NULL
         or sorted_squared_norms == NULL
         or pair_distances == NULL
+        or (
+            with_removal
+            and (
+                pair_seconds == NULL
+                or second_cells == NULL
+                or gaps == NULL
+                or sorted_gaps == NULL
+            )
+        )
     ):
         n_failed = 1
     else:
@@ -2646,7 +2683,11 @@ def _emeans_steps_two_level(
             chunk_labels = <int*> malloc(
                 max(COARSE_CHUNK_SIZE, PAIR_CHUNK_SIZE) * sizeof(int)
             )
-            sums = <double*> malloc(n_features * sizeof(double))
+            # With the removal statistics, the second half is for the axis
+            # sums of the batch.
+            sums = <double*> malloc(
+                (2 if with_removal else 1) * n_features * sizeof(double)
+            )
 
             if emeans_buffers_ready(
                 &n_ready,
@@ -2666,6 +2707,10 @@ def _emeans_steps_two_level(
                     cluster_starts, batch_order, X_batch, &cells[0, 0],
                     cell_squared_norms, sorted_centers, sorted_squared_norms,
                     pair_distances, X_chunk, distances, chunk_labels, sums,
+                    NULL if removal_cost is None else &removal_cost[0],
+                    NULL if removal_cost is None else &axis_sums[0, 0],
+                    NULL if removal_cost is None else &axes[0, 0],
+                    pair_seconds, second_cells, gaps, sorted_gaps,
                 )
 
             free(X_chunk)
@@ -2673,6 +2718,10 @@ def _emeans_steps_two_level(
             free(chunk_labels)
             free(sums)
 
+    free(pair_seconds)
+    free(second_cells)
+    free(gaps)
+    free(sorted_gaps)
     free(labels)
     free(cluster_starts)
     free(batch_order)
@@ -2846,6 +2895,13 @@ cdef void _two_level_steps_worker(
     floating *distances,              # thread-local
     int *chunk_labels,                # thread-local
     double *sums,                     # thread-local
+    double *removal_cost,             # shared (n_clusters,), or NULL
+    double *axis_sums,                # shared (n_clusters, n_features), or NULL
+    floating *axes,                   # shared (n_clusters, n_features), or NULL
+    floating *pair_seconds,           # shared (batch_size, max_probes), or NULL
+    floating *second_cells,           # shared (batch_size,), or NULL
+    double *gaps,                     # shared (batch_size,), or NULL
+    double *sorted_gaps,              # shared (batch_size,), or NULL
 ) noexcept nogil:
     """What each thread of `_emeans_steps_two_level` runs.
 
@@ -2860,7 +2916,9 @@ cdef void _two_level_steps_worker(
         intp_t n_cells = tl.n_cells
         intp_t n_blocks = tl.n_blocks
         intp_t s, n_batch, n_chunks, chunk_idx, start, n_chunk_rows, r, j, m, c
-        intp_t first, last, block_idx, count
+        intp_t first, last, block_idx, count, n_members
+        bint with_removal = removal_cost != NULL
+        double *axis_batch = sums + n_features
         const intp_t *batch
         intp_t *counter
         intp_t *counts
@@ -2905,6 +2963,7 @@ cdef void _two_level_steps_worker(
             tl, counter, X_batch, n_batch, cells, cell_squared_norms,
             sorted_centers, sorted_squared_norms, pair_distances, labels,
             <const floating*> NULL, NULL, X_chunk, distances, chunk_labels,
+            pair_seconds, second_cells, gaps,
         )
 
         # Sort of the batch rows by center, in the order of `tl.order`, then
@@ -2953,7 +3012,8 @@ cdef void _two_level_steps_worker(
         emeans_wait(&counter[TL_SORT_FILL + 1], n_blocks)
 
         # 4. Rows of each center, cell by cell. The rows of the center
-        # tl.order[m] are batch_order[cluster_starts[m]:cluster_starts[m + 1]].
+        # tl.order[m] are batch_order[cluster_starts[m]:cluster_starts[m + 1]],
+        # and `sorted_gaps` has their gaps in the same order.
         while True:
             c = emeans_fetch_add(&counter[TL_SORT_CELLS], 1)
             if c >= n_cells:
@@ -2974,6 +3034,8 @@ cdef void _two_level_steps_worker(
             for r in range(tl.pair_starts[c], tl.pair_starts[c + 1]):
                 m = tl.position[labels[tl.pair_slots[r]]]
                 batch_order[cluster_starts[m + 1]] = tl.pair_slots[r]
+                if with_removal:
+                    sorted_gaps[cluster_starts[m + 1]] = gaps[tl.pair_slots[r]]
                 cluster_starts[m + 1] += 1
             emeans_fetch_add(&counter[TL_SORT_CELLS + 1], 1)
         emeans_wait(&counter[TL_SORT_CELLS + 1], n_cells)
@@ -2986,9 +3048,24 @@ cdef void _two_level_steps_worker(
             last = min(first + block_size, n_clusters)
             for m in range(first, last):
                 j = tl.order[m]
+                n_members = cluster_starts[m + 1] - cluster_starts[m]
+                if with_removal:
+                    # Before the update of the center, as in `_steps_worker`.
+                    if n_members > 0:
+                        _axis_batch(
+                            X_batch, batch_order + cluster_starts[m], n_members,
+                            n_features, centers + j * n_features,
+                            axes + j * n_features, axis_batch,
+                        )
+                    _removal_update(
+                        &removal_cost[j], axis_sums + j * n_features,
+                        axes + j * n_features, axis_batch,
+                        sorted_gaps + cluster_starts[m], n_members,
+                        step_sizes[s], n_features,
+                    )
                 _update_center(
-                    X_batch, batch_order + cluster_starts[m],
-                    cluster_starts[m + 1] - cluster_starts[m], n_features,
+                    X_batch, batch_order + cluster_starts[m], n_members,
+                    n_features,
                     centers + j * n_features, &weight_ema[j], step_sizes[s],
                     NULL if epoch_sums == NULL
                     else epoch_sums + j * n_features,
@@ -3062,7 +3139,7 @@ cdef void _two_level_labels_worker(
             cells, cell_squared_norms, sorted_centers, sorted_squared_norms,
             pair_distances, labels + start, centers,
             chunk_inertia + start // CHUNK_SIZE, X_chunk, distances,
-            chunk_labels,
+            chunk_labels, <floating*> NULL, <floating*> NULL, NULL,
         )
 
 
@@ -3188,11 +3265,20 @@ cdef void _search(
     floating *X_chunk,                          # thread-local
     floating *distances,                        # thread-local
     int *chunk_labels,                          # thread-local
+    floating *pair_seconds,                     # shared (n_rows, max_probes)
+    floating *second_cells,                     # shared (n_rows,)
+    double *gaps,                               # OUT (n_rows,), or NULL
 ) noexcept nogil:
     """Two-level assignment of contiguous rows. Run by each thread of the team.
 
     `chunk_inertia` gets the sum of the squared distances of the rows of each
     chunk of CHUNK_SIZE rows to the center of their label.
+
+    If `gaps` is not NULL, it gets how much further the second nearest center
+    of each row is, in squared distance, for the cost-based revival. It is the
+    second nearest of the centers of the probed cells, or the coarse center
+    of the second nearest cell when the row probes a single center.
+    `pair_seconds` and `second_cells` are work arrays for it.
     """
     cdef:
         intp_t n_cells = tl.n_cells
@@ -3205,13 +3291,15 @@ cdef void _search(
         )
         intp_t chunk_idx, start, n_chunk_rows, r, i, c, q
         intp_t n_probes, block_idx, n_pairs, n_tasks, task_idx, count
-        intp_t first, n_members, block_start, n_block, slot
+        intp_t first, n_members, block_start, n_block, slot, j, nearest_probe
         int nearest, label
         int *probes
         intp_t *counts
         const floating *row
         floating squared_norm, nearest_distance, threshold, dist, min_dist
+        floating second_dist
         floating max_finite
+        double gap
         double threshold_64, total
 
     if floating is float:
@@ -3273,6 +3361,14 @@ cdef void _search(
                     probes[q] = <int> c
             if n_probes < max_probes:
                 probes[n_probes] = -1
+            if gaps != NULL:
+                # Only read when the row probes a single center.
+                second_dist = <floating> INFINITY
+                if n_probes == 1:
+                    for c in range(n_cells):
+                        if c != nearest and row[c] < second_dist:
+                            second_dist = row[c]
+                second_cells[i] = second_dist
         emeans_fetch_add(&counter[TL_COARSE + 1], 1)
     emeans_wait(&counter[TL_COARSE + 1], n_coarse_chunks)
 
@@ -3363,6 +3459,22 @@ cdef void _search(
             for r in range(n_chunk_rows):
                 slot = tl.pair_slots[start + r]
                 dist = distances[r * n_block + chunk_labels[r]]
+                if gaps != NULL:
+                    # Second nearest center of the pair: the one of the block,
+                    # merged with the two nearest of the previous blocks.
+                    second_dist = <floating> INFINITY
+                    for j in range(n_block):
+                        if (
+                            j != chunk_labels[r]
+                            and distances[r * n_block + j] < second_dist
+                        ):
+                            second_dist = distances[r * n_block + j]
+                    if block_start == 0:
+                        pair_seconds[slot] = second_dist
+                    elif dist < pair_distances[slot]:
+                        pair_seconds[slot] = min(pair_distances[slot], second_dist)
+                    else:
+                        pair_seconds[slot] = min(pair_seconds[slot], dist)
                 # The centers of a cell are sorted by index: on ties, the
                 # first block has the lowest index.
                 if block_start == 0 or dist < pair_distances[slot]:
@@ -3385,6 +3497,7 @@ cdef void _search(
             slot = i * max_probes
             min_dist = pair_distances[slot]
             label = tl.pair_labels[slot]
+            nearest_probe = 0
             for q in range(1, max_probes):
                 if tl.probes[slot + q] < 0:
                     break
@@ -3394,7 +3507,20 @@ cdef void _search(
                 ):
                     min_dist = dist
                     label = tl.pair_labels[slot + q]
+                    nearest_probe = q
             labels[i] = label
+            if gaps != NULL:
+                second_dist = pair_seconds[slot + nearest_probe]
+                for q in range(max_probes):
+                    if tl.probes[slot + q] < 0:
+                        break
+                    if q != nearest_probe and pair_distances[slot + q] < second_dist:
+                        second_dist = pair_distances[slot + q]
+                if second_dist == INFINITY:
+                    second_dist = second_cells[i]
+                # A coarse center can be nearer than the nearest center.
+                gap = <double> second_dist - min_dist
+                gaps[i] = gap if gap > 0 else 0.0
             if chunk_inertia != NULL:
                 total += _squared_distance(X_rows + i * n_features,
                                            centers + label * n_features,

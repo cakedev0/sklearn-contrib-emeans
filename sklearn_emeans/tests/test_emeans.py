@@ -411,11 +411,20 @@ def test_emeans_revival_zero_never_revives(monkeypatch):
 
 
 def _reference_removal_step(
-    X, batch_indices, centers, removal_cost, axis_sums, axes, step_size
+    X,
+    batch_indices,
+    centers,
+    removal_cost,
+    axis_sums,
+    axes,
+    step_size,
+    labels=None,
+    gaps=None,
 ):
     """NumPy implementation of the statistics of the cost-based revival.
 
     One step, on the centers before the step, updating the statistics inplace.
+    `labels` and `gaps` are the ones of the exact assignment by default.
     """
     X_batch = X[batch_indices]
     if sp.issparse(X_batch):
@@ -423,9 +432,10 @@ def _reference_removal_step(
     X_batch = X_batch.astype(np.float64)
     centers = centers.astype(np.float64)
     distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-    labels = distances.argmin(axis=1)
-    two_nearest = np.sort(distances, axis=1)[:, :2]
-    gaps = two_nearest[:, 1] - two_nearest[:, 0]
+    if labels is None:
+        labels = distances.argmin(axis=1)
+        two_nearest = np.sort(distances, axis=1)[:, :2]
+        gaps = two_nearest[:, 1] - two_nearest[:, 0]
 
     for j in range(centers.shape[0]):
         mask = labels == j
@@ -627,12 +637,6 @@ def test_emeans_cost_based_revival_one_cluster():
     X, _ = make_blobs(n_samples=200, n_features=3, random_state=0)
     emeans = EMeans(n_clusters=1, revival="cost-based", random_state=0).fit(X)
     assert_allclose(emeans.cluster_centers_[0], X.mean(axis=0))
-
-
-def test_emeans_cost_based_revival_two_level_error():
-    X = np.zeros((10, 2))
-    with pytest.raises(ValueError, match="not supported with assignment='two-level'"):
-        EMeans(n_clusters=2, revival="cost-based", assignment="two-level").fit(X)
 
 
 @pytest.mark.parametrize("init", ["random", "k-means||"])

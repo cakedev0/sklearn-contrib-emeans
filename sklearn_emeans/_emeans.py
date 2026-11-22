@@ -397,6 +397,7 @@ def _revive_cheap_clusters(
     axes,
     epoch_sums=None,
     epoch_counts=None,
+    cell_of_center=None,
 ):
     """Move the clusters that are cheap to remove to split the longest ones.
 
@@ -411,6 +412,8 @@ def _revive_cheap_clusters(
     are at its center -/+ s u, where u is its axis and s the mean of a
     half-normal distribution that has the variance of the cluster along its
     axis, estimated as ||U|| / N. They share its weight and its statistics.
+    With the two-level assignment, the cheap cluster also goes to the cell of
+    its donor in `cell_of_center`.
 
     In the last epoch, `epoch_sums` and `epoch_counts` are given: the two
     halves forget the rows of the epoch that they got before the split, so
@@ -444,6 +447,8 @@ def _revive_cheap_clusters(
         for stats in (epoch_sums, epoch_counts):
             stats[cheap_indices] = 0
             stats[donor_indices] = 0
+    if cell_of_center is not None:
+        cell_of_center[cheap_indices] = cell_of_center[donor_indices]
     return len(cheap_indices)
 
 
@@ -558,7 +563,9 @@ class EMeans(
         implementation since `pull request 5915 of faiss
         <https://github.com/facebookresearch/faiss/pull/5915>`_, without its
         reassignment of the samples of the last epoch. It is only supported
-        for NumPy arrays and sparse matrices, with `assignment='exact'`.
+        for NumPy arrays and sparse matrices. With `assignment='two-level'`,
+        the second nearest center of a sample is the one of the centers it is
+        compared to.
 
         .. warning::
             'greedy' and 'cost-based' are experimental: their algorithms may
@@ -875,10 +882,6 @@ class EMeans(
                     "inputs with array_api_dispatch=True."
                 )
             return self._fit_array_api(xp, X)
-        if self.revival == "cost-based" and self.assignment == "two-level":
-            raise ValueError(
-                "revival='cost-based' is not supported with assignment='two-level'."
-            )
         X = _validate_data(self, X)
         if self.assignment == "two-level" and sp.issparse(X):
             raise ValueError("assignment='two-level' is not supported for sparse X.")
@@ -921,13 +924,14 @@ class EMeans(
             # The cells are updated inplace by the steps and the revivals.
             cells, cell_of_center = _init_cells(centers, random_state)
 
-            def emeans_steps(*args):
+            def emeans_steps(*args, **kwargs):
                 _emeans_steps_two_level(
                     *args,
                     cells,
                     cell_of_center,
                     _TWO_LEVEL_MAX_PROBES,
                     _TWO_LEVEL_RATIO,
+                    **kwargs,
                 )
 
         else:
@@ -987,6 +991,7 @@ class EMeans(
                         axes,
                         epoch_sums if is_last_epoch else None,
                         epoch_counts if is_last_epoch else None,
+                        cell_of_center,
                     )
                 # All the steps of the epoch in one call, which revives the
                 # dead clusters every `revival_period` steps: see `_run_steps`

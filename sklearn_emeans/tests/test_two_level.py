@@ -11,14 +11,22 @@ from sklearn.datasets import make_blobs
 from threadpoolctl import threadpool_limits
 
 from sklearn_emeans import EMeans, _emeans
-from sklearn_emeans._emeans import _init_cells, _revive_dead_clusters
+from sklearn_emeans._emeans import (
+    _init_cells,
+    _revive_cheap_clusters,
+    _revive_dead_clusters,
+)
 from sklearn_emeans._kernels import (
     _emeans_steps,
     _emeans_steps_two_level,
     _labels_inertia,
     _labels_inertia_two_level,
 )
-from sklearn_emeans.tests.test_emeans import _reference_step
+from sklearn_emeans.tests.test_emeans import (
+    _reference_removal_step,
+    _reference_step,
+    _removal_stats,
+)
 
 
 def _squared_distances(X, Y):
@@ -35,11 +43,21 @@ def _reference_refresh(centers, weight_ema, cells, cell_of_center):
     cell_of_center[:] = _squared_distances(centers, cells).argmin(axis=1)
 
 
-def _reference_labels(X, centers, cells, cell_of_center, max_probes, ratio):
-    """NumPy implementation of the two-level assignment, once refreshed."""
-    distances = _squared_distances(X, cells).astype(np.float64)
+def _reference_labels(
+    X, centers, cells, cell_of_center, max_probes, ratio, return_gaps=False
+):
+    """NumPy implementation of the two-level assignment, once refreshed.
+
+    The gap of a sample is how much further its second nearest candidate is,
+    in squared distance. With a single candidate, the coarse center of its
+    second nearest cell stands for the second one.
+    """
+    X = X.astype(np.float64)
+    centers = centers.astype(np.float64)
+    distances = _squared_distances(X, cells.astype(np.float64))
     distances[:, np.bincount(cell_of_center, minlength=len(cells)) == 0] = np.inf
     labels = np.empty(len(X), dtype=np.int32)
+    gaps = np.empty(len(X))
     for i in range(len(X)):
         nearest_cells = np.argsort(distances[i], kind="stable")[:max_probes]
         probes = [nearest_cells[0]]
@@ -50,10 +68,13 @@ def _reference_labels(X, centers, cells, cell_of_center, max_probes, ratio):
             ):
                 probes.append(c)
         candidates = np.flatnonzero(np.isin(cell_of_center, probes))
-        labels[i] = candidates[
-            _squared_distances(X[i : i + 1], centers[candidates])[0].argmin()
-        ]
-    return labels
+        candidate_distances = _squared_distances(X[i : i + 1], centers[candidates])[0]
+        labels[i] = candidates[candidate_distances.argmin()]
+        two_nearest = np.sort(candidate_distances)[:2]
+        if len(candidates) == 1:
+            two_nearest = [two_nearest[0], np.sort(distances[i])[1]]
+        gaps[i] = max(two_nearest[1] - two_nearest[0], 0)
+    return (labels, gaps) if return_gaps else labels
 
 
 def _data(dtype, n_samples=1500, n_features=6, n_clusters=40, n_cells=6, seed=0):
@@ -384,6 +405,162 @@ def test_revive_dead_clusters_moves_cells():
     donor = np.flatnonzero(weight_ema == weight_ema[1])
     donor = donor[donor != 1][0]
     assert cell_of_center[1] == cell_of_center[donor] == donor
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("max_probes, ratio", [(1, 1.15), (3, 1.3), (3, np.inf)])
+@pytest.mark.parametrize("n_threads", [1, 3])
+def test_two_level_removal_stats_match_reference(dtype, max_probes, ratio, n_threads):
+    X, centers, weight_ema, cells, cell_of_center = _data(dtype)
+    n_clusters, n_features = centers.shape
+    # An empty cell, a center far from the data, and a center alone in its
+    # cell, with samples around it.
+    cells[0] = 100
+    cell_of_center[cell_of_center == 0] = 1
+    centers[3] = -100
+    rows = np.random.RandomState(1).permutation(len(X))[:1000].astype(np.intp)
+    X[rows[::20]] += 30
+    centers[5] = cells[2] = X[rows[0]]
+    cell_of_center[cell_of_center == 2] = 1
+    cell_of_center[5] = 2
+    batch_size, step_sizes = 400, np.array([0.5, 0.3, 0.2])
+    stats = _removal_stats(np.random.RandomState(2), n_clusters, n_features, dtype)
+
+    ref = [a.copy() for a in (centers, weight_ema, cells, cell_of_center)]
+    stats_ref = {name: value.copy() for name, value in stats.items()}
+    n_single_candidate = 0
+    for s, step_size in enumerate(step_sizes):
+        batch = rows[s * batch_size : (s + 1) * batch_size]
+        _reference_refresh(*ref)
+        labels, gaps = _reference_labels(
+            X[batch], ref[0], ref[2], ref[3], max_probes, ratio, return_gaps=True
+        )
+        n_single_candidate += np.count_nonzero(
+            (np.bincount(ref[3], minlength=len(cells)) == 1)[ref[3][labels]]
+        )
+        _reference_removal_step(
+            X, batch, ref[0], *stats_ref.values(), step_size, labels, gaps
+        )
+        _reference_step(X, batch, ref[0], ref[1], step_size, None, labels=labels)
+    if ratio < np.inf:
+        assert n_single_candidate > 0
+
+    _emeans_steps_two_level(
+        X,
+        rows,
+        batch_size,
+        centers,
+        weight_ema,
+        step_sizes,
+        None,
+        None,
+        0,
+        0,
+        None,
+        n_threads,
+        cells,
+        cell_of_center,
+        max_probes,
+        ratio,
+        **stats,
+    )
+
+    rtol = 1e-4 if dtype == np.float32 else 1e-9
+    for name in stats:
+        scale = np.abs(stats_ref[name]).max()
+        assert_allclose(stats[name], stats_ref[name], rtol=rtol, atol=rtol * scale)
+    # The statistics don't change the steps.
+    assert_allclose(centers, ref[0], rtol=rtol, atol=rtol)
+    assert_allclose(weight_ema, ref[1], rtol=rtol)
+    assert_array_equal(cell_of_center, ref[3])
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_two_level_removal_stats_all_cells_probed_same_as_exact(dtype):
+    X, centers, weight_ema, cells, cell_of_center = _data(dtype)
+    n_clusters, n_features = centers.shape
+    rows = np.random.RandomState(1).permutation(len(X)).astype(np.intp)
+    step_sizes = np.linspace(0.5, 0.1, 6)
+    stats = _removal_stats(np.random.RandomState(2), n_clusters, n_features, dtype)
+    stats_exact = {name: value.copy() for name, value in stats.items()}
+    args = (X, rows, 256, centers, weight_ema, step_sizes, None, None, 0, 0, None, 2)
+
+    _emeans_steps(
+        *args[:3], centers.copy(), weight_ema.copy(), *args[5:], **stats_exact
+    )
+    _emeans_steps_two_level(*args, cells, cell_of_center, len(cells), np.inf, **stats)
+    rtol = 1e-3 if dtype == np.float32 else 1e-9
+    for name in stats:
+        scale = np.abs(stats_exact[name]).max()
+        assert_allclose(stats[name], stats_exact[name], rtol=rtol, atol=rtol * scale)
+
+
+def test_two_level_removal_stats_do_not_depend_on_n_threads():
+    X, centers, weight_ema, cells, cell_of_center = _data(
+        np.float32, n_samples=6000, n_clusters=150, n_cells=12
+    )
+    rows = np.random.RandomState(1).permutation(len(X)).astype(np.intp)
+    step_sizes = np.linspace(0.5, 0.1, 4)
+
+    def run(n_threads):
+        state = [a.copy() for a in (centers, weight_ema, cells, cell_of_center)]
+        stats = _removal_stats(np.random.RandomState(2), *centers.shape, np.float32)
+        with threadpool_limits(limits=1, user_api="blas"):
+            _emeans_steps_two_level(
+                X,
+                rows,
+                1500,
+                state[0],
+                state[1],
+                step_sizes,
+                None,
+                None,
+                0,
+                0,
+                None,
+                n_threads,
+                state[2],
+                state[3],
+                4,
+                1.15,
+                **stats,
+            )
+        return state + list(stats.values())
+
+    for result, expected in zip(run(5), run(1)):
+        assert_array_equal(result, expected)
+
+
+def test_revive_cheap_clusters_moves_cells():
+    # A revived center goes to the cell of its donor.
+    centers = np.arange(12, dtype=np.float64).reshape(4, 3)
+    cell_of_center = np.array([0, 1, 2, 3], dtype=np.int32)
+    n_revived = _revive_cheap_clusters(
+        centers,
+        np.ones(4),
+        np.array([10.0, 0.0, 10.0, 10.0]),
+        np.diag([1.0, 1.0, 5.0])[[0, 1, 2, 0]],
+        np.eye(3)[[0, 1, 2, 0]],
+        cell_of_center=cell_of_center,
+    )
+    assert n_revived == 1
+    assert_array_equal(cell_of_center, [0, 2, 2, 3])
+
+
+def test_emeans_two_level_cost_based_revival(monkeypatch):
+    # Half of the initial centers are far from the data and get no samples.
+    X, _ = make_blobs(n_samples=5000, n_features=5, centers=40, random_state=0)
+    init = X[:40].copy()
+    init[20:] += 1000
+    params = dict(n_clusters=40, init=init, revival="cost-based", random_state=0)
+    emeans = _fit_two_level(X, monkeypatch, **params)
+    exact = EMeans(**params).fit(X)
+    assert np.all(np.bincount(emeans.labels_, minlength=40) > 0)
+    assert emeans.inertia_ < 1.1 * exact.inertia_
+
+    with threadpool_limits(limits=1, user_api="openmp"):
+        sequential = _fit_two_level(X, monkeypatch, **params)
+    assert_array_equal(sequential.cluster_centers_, emeans.cluster_centers_)
 
 
 def test_emeans_two_level_greedy_revival(monkeypatch):

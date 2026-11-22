@@ -241,7 +241,9 @@ def test_two_level_all_cells_probed_same_as_exact(dtype):
 
 def test_two_level_ties_go_to_lowest_index():
     # Duplicated centers: as with the exact assignment, a sample goes to the
-    # one of lowest index.
+    # one of lowest index, when the two have the same distance. Some BLAS
+    # (Accelerate) don't round all the columns of a GEMM the same way, and the
+    # distances to two duplicates can then differ.
     rng = np.random.RandomState(0)
     X = rng.normal(size=(600, 4))
     centers = np.concatenate([X[:5], X[:5]])
@@ -254,8 +256,9 @@ def test_two_level_ties_go_to_lowest_index():
         X, centers, np.ones(10), cells, cell_of_center, 3, np.inf, labels, 2
     )
     _labels_inertia(X, centers, labels_exact, 2)
-    assert_array_equal(labels, labels_exact)
-    assert labels.max() < 5
+    assert_array_equal(labels % 5, labels_exact % 5)
+    if labels_exact.max() < 5:
+        assert labels.max() < 5
 
 
 @pytest.mark.parametrize("n_threads", [3, 8])

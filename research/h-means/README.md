@@ -221,7 +221,7 @@ groups (`O(n sqrt(k))`), except `random`, `sub-10` and `k-means||`.
 | `kpp-inertia` | k-means++ inside each group (one draw per step), `k_j` proportional to the inertia. |
 | `h2` | One epoch of the frozen two-level e-means. |
 | `sub-10` | Two epochs of the two-level e-means on a 10% subsample. |
-| `k-means||` | The `O(n k)` init of `EMeans`, as a yardstick (exact fit only). |
+| `k-means\|\|` | The `O(n k)` init of `EMeans`, as a yardstick (exact fit only). |
 
 Inertia of the labels after 5 epochs of the adaptive two-level fit, against
 the random init. Mean over 3 seeds for the 1M sets, 2 for DEEP 10M at
@@ -236,7 +236,7 @@ is with the exact `EMeans`, against random with the exact `EMeans`.
 | `kpp-inertia` | -0.01% | 0.00% | -0.01% | -0.12% | -0.36% | -0.23% |
 | `h2` | -0.14% | -0.05% | -0.04% | -0.15% | -0.20% | -0.22% |
 | `sub-10` | -0.04% | -0.05% | -0.07% | -0.05% | -0.16% | -0.32% |
-| `k-means||` | -0.03% | -0.04% | -0.06% | | -0.53% | -0.41% |
+| `k-means\|\|` | -0.03% | -0.04% | -0.06% | | -0.53% | -0.41% |
 
 Random init with more epochs, against 5 epochs:
 
@@ -305,7 +305,7 @@ over the seeds: 3 for SIFT, GloVe and CLIP, 2 for DEEP 10M at `k=10k`, 1 at
 | `kpp-t4` |  |  |  |  | -0.29% | -0.16% |
 | `kpp-inertia-t4` |  |  |  |  | -0.52% | -0.36% |
 | `sub-10` | -0.04% | -0.02% | -0.04% | -0.03% | -0.12% | -0.16% |
-| `k-means||` | -0.04% | -0.01% | -0.04% | -0.16% | -0.52% | -0.30% |
+| `k-means\|\|` | -0.04% | -0.01% | -0.04% | -0.16% | -0.52% | -0.30% |
 | `random`, 6 epochs | -0.05% | -0.13% | -0.05% | -0.16% | +0.04% | -0.06% |
 | `random`, 8 epochs | -0.28% | -0.27% | +0.05% | -0.39% | -0.23% | -0.10% |
 | `random`, 10 epochs | -0.43% | -0.36% | -0.01% | -0.53% | -0.37% | +0.10% |
@@ -319,7 +319,7 @@ over the seeds: 3 for SIFT, GloVe and CLIP, 2 for DEEP 10M at `k=10k`, 1 at
 | `kpp-t4` | -0.6% | -0.6% | -4.2% | -4.9% | -65.0% | -46.6% | -18.2% |
 | `kpp-inertia-t4` | -0.9% | -0.8% | +2.2% | -3.1% | -64.2% | -46.9% | -54.4% |
 | `sub-10` | -0.5% | -0.1% | -0.3% | -6.4% | -15.6% | +33.0% | -10.5% |
-| `k-means||` | -1.0% | -0.9% | -5.3% | -7.3% | -73.9% | -66.5% | -62.7% |
+| `k-means\|\|` | -1.0% | -0.9% | -5.3% | -7.3% | -73.9% | -66.5% | -62.7% |
 | `random`, 6 epochs | -0.1% | -0.1% | +0.0% | -1.5% | -3.3% | -1.9% | -0.0% |
 | `random`, 8 epochs | -0.3% | -0.3% | -1.2% | -10.6% | -8.4% | -8.4% | +0.2% |
 | `random`, 10 epochs | -0.3% | -0.2% | +0.0% | -9.2% | +21.5% | -12.0% | +1.8% |
@@ -338,7 +338,7 @@ busy: the timings are indicative.
 | `kpp-t4` |  |  |  |  | 5.53 | 0.62 |
 | `kpp-inertia-t4` |  |  |  |  | 5.46 | 0.79 |
 | `sub-10` | 0.32 | 0.41 | 0.64 | 1.41 | 0.61 | 0.31 |
-| `k-means||` | 5.25 | 11 | 15 | 268 | 11 | 0.68 |
+| `k-means\|\|` | 5.25 | 11 | 15 | 268 | 11 | 0.68 |
 | fit, 5 epochs | 0.92 | 2.13 | 5.38 | 12.27 | 2.03 | 1.24 |
 
 | init | RCV1 LSA, 1024 | RCV1 LSA, 4096 | covtype, 1024 | KDD Cup 99, 1024 | blobs, 1024 | blobs, 10k | Zipf blobs, 1024 |
@@ -350,7 +350,7 @@ busy: the timings are indicative.
 | `kpp-t4` | 0.50 | 2.05 | 0.37 | 1.21 | 0.54 | 5.89 | 0.49 |
 | `kpp-inertia-t4` | 0.54 | 1.98 | 0.35 | 1.29 | 0.59 | 5.50 | 0.46 |
 | `sub-10` | 0.15 | 0.20 | 0.10 | 0.29 | 0.16 | 0.35 | 0.14 |
-| `k-means||` | 0.28 | 1.61 | 0.21 | 0.91 | 0.26 | 3.33 | 0.33 |
+| `k-means\|\|` | 0.28 | 1.61 | 0.21 | 0.91 | 0.26 | 3.33 | 0.33 |
 | fit, 5 epochs | 0.53 | 0.58 | 0.39 | 1.40 | 0.74 | 1.11 | 0.47 |
 
 - Embeddings: same picture as with the prototype. `stratified-inertia` gains

@@ -79,18 +79,21 @@ cells follow the centers (`_refresh_cells`), then assigns the batch
 threads, since the rounding of a GEMM depends on its shape. The pure NumPy
 reference is in `tests/test_two_level.py`.
 
-`revival="cost-based"` (NumPy arrays and CSR matrices, exact assignment only)
-is the removal-cost revival of faiss#5915. The exact kernels take three more
-arrays (`removal_cost`, `axis_sums`, `axes`) and update them at each step
-(`_removal_update`), with the second nearest center of each row. The revival
-itself is `_revive_cheap_clusters` in `_emeans.py`. It follows `NumpyEmeans`
-with `capture_assignments=False` (the reassignment of the rows of the last
-epoch, `closing_handover`, is not implemented), with two differences. At
-a split, the axis sums of the two halves are scaled by
-`_HALF_NORMAL_VARIANCE`. And there is no revival after the last step of the
-fit, where the reference has one when the number of steps is a multiple of 5:
-the two halves of a split would get no row and keep the positions of the
-split. Without these two differences it gives the same centers.
+`revival="cost-based"` (NumPy arrays and CSR matrices) is the removal-cost
+revival of faiss#5915. The exact and two-level kernels take three more arrays
+(`removal_cost`, `axis_sums`, `axes`) and update them at each step
+(`_removal_update`), with the second nearest center of each row. With the
+two-level assignment, it is the second nearest of the centers of the probed
+cells, or the coarse center of the second nearest cell for a row that probes
+a single center (`_search`). The revival itself is `_revive_cheap_clusters`
+in `_emeans.py`. It follows `NumpyEmeans` with `capture_assignments=False`
+(the reassignment of the rows of the last epoch, `closing_handover`, is not
+implemented), with two differences. At a split, the axis sums of the two
+halves are scaled by `_HALF_NORMAL_VARIANCE`. And there is no revival after
+the last step of the fit, where the reference has one when the number of
+steps is a multiple of 5: the two halves of a split would get no row and keep
+the positions of the split. Without these two differences it gives the same
+centers.
 
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and

@@ -58,7 +58,7 @@ physical cores, or `OMP_NUM_THREADS` if it is set.
   replaces the clusters that are cheap to remove (their samples have another
   center almost as close) by halves of the longest clusters, split along
   their longest direction. It is only supported for NumPy arrays and sparse
-  matrices, with `assignment="exact"`. Both are experimental: their
+  matrices. Both are experimental: their
   algorithms may change from one version to the next, and their results with
   them.
 - `assignment="two-level"` is experimental: its algorithm may change from one

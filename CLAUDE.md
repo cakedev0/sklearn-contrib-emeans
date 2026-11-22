@@ -89,11 +89,12 @@ a single center (`_search`). The revival itself is `_revive_cheap_clusters`
 in `_emeans.py`. It follows `NumpyEmeans` with `capture_assignments=False`
 (the reassignment of the rows of the last epoch, `closing_handover`, is not
 implemented), with two differences. At a split, the axis sums of the two
-halves are scaled by `_HALF_NORMAL_VARIANCE`. And there is no revival after
-the last step of the fit, where the reference has one when the number of
-steps is a multiple of 5: the two halves of a split would get no row and keep
-the positions of the split. Without these two differences it gives the same
-centers.
+halves are scaled by `_HALF_NORMAL_VARIANCE`. And there is no revival during
+the last epoch when `n_epochs >= 2`: the two halves of a cluster split there
+would end at the mean of the few rows they get after the split. With fewer
+epochs there is only no revival after the last step of the fit, where the
+reference has one when the number of steps is a multiple of 5. Without these
+two differences it gives the same centers.
 
 After the last epoch, the final centers are the means of the samples assigned
 during that epoch (`epoch_sums / epoch_counts`), not the EMA centers, and

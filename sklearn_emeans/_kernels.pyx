@@ -2587,7 +2587,8 @@ def _emeans_steps_two_level(
     removal_cost, axis_sums, axes : ndarray, default=None
         The statistics of the cost-based revival, as in `_emeans_steps`. The
         second nearest center of a row is the one of the centers of the cells
-        it probes.
+        it probes, or the coarse center of its second nearest cell when it
+        probes a single center.
     """
     cdef:
         TwoLevel tl

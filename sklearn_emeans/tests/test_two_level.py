@@ -50,7 +50,8 @@ def _reference_labels(
 
     The gap of a sample is how much further its second nearest candidate is,
     in squared distance. With a single candidate, the coarse center of its
-    second nearest cell stands for the second one.
+    second nearest cell stands for the second one. `return_gaps=True` also
+    returns which samples have a single candidate.
     """
     X = X.astype(np.float64)
     centers = centers.astype(np.float64)
@@ -58,6 +59,7 @@ def _reference_labels(
     distances[:, np.bincount(cell_of_center, minlength=len(cells)) == 0] = np.inf
     labels = np.empty(len(X), dtype=np.int32)
     gaps = np.empty(len(X))
+    single_candidate = np.zeros(len(X), dtype=bool)
     for i in range(len(X)):
         nearest_cells = np.argsort(distances[i], kind="stable")[:max_probes]
         probes = [nearest_cells[0]]
@@ -72,9 +74,10 @@ def _reference_labels(
         labels[i] = candidates[candidate_distances.argmin()]
         two_nearest = np.sort(candidate_distances)[:2]
         if len(candidates) == 1:
+            single_candidate[i] = True
             two_nearest = [two_nearest[0], np.sort(distances[i])[1]]
         gaps[i] = max(two_nearest[1] - two_nearest[0], 0)
-    return (labels, gaps) if return_gaps else labels
+    return (labels, gaps, single_candidate) if return_gaps else labels
 
 
 def _data(dtype, n_samples=1500, n_features=6, n_clusters=40, n_cells=6, seed=0):
@@ -432,12 +435,10 @@ def test_two_level_removal_stats_match_reference(dtype, max_probes, ratio, n_thr
     for s, step_size in enumerate(step_sizes):
         batch = rows[s * batch_size : (s + 1) * batch_size]
         _reference_refresh(*ref)
-        labels, gaps = _reference_labels(
+        labels, gaps, single_candidate = _reference_labels(
             X[batch], ref[0], ref[2], ref[3], max_probes, ratio, return_gaps=True
         )
-        n_single_candidate += np.count_nonzero(
-            (np.bincount(ref[3], minlength=len(cells)) == 1)[ref[3][labels]]
-        )
+        n_single_candidate += np.count_nonzero(single_candidate)
         _reference_removal_step(
             X, batch, ref[0], *stats_ref.values(), step_size, labels, gaps
         )

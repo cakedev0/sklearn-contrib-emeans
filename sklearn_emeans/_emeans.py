@@ -596,7 +596,8 @@ class EMeans(
         split again right away. It is only supported
         for NumPy arrays and sparse matrices. With `assignment='two-level'`,
         the second nearest center of a sample is the one of the centers it is
-        compared to.
+        compared to. For a sample that is compared to a single center, the
+        center of its second nearest cell stands for it.
 
         .. warning::
             'greedy' and 'cost-based' are experimental: their algorithms may

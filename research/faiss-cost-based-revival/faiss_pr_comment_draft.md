@@ -5,7 +5,7 @@ From these runs:
 - The cost-based rule seems to remove most of the gap that the mass-based revival leaves (16-18% of inertia on a 3-D road network), and it ends within ~1% of greedy on most datasets. It looks better than greedy on KDD Cup 99 up to k=1024, and worse at k=4096.
 - It also scales better: on GPU it adds 10 to 25% to the fit time at any k (30 to 50% in `NumpyEmeans`), while greedy is quadratic in k and runs on the host (~2x the fit time at k=4096 on CPU, much more on GPU). So I think the cost-based approach is the better one.
 - A k-means|| init still seems useful on top of it: 0.5 to 4% lower inertia on the road network, Census and household power.
-- Two things that may be worth a look: the top-2 search is very slow in one low-dimension case (75 ms against 0.8 ms for top-1), and on KDD and Shuttle many final centroids are nearest to no training row (~320 of 4096 on KDD).
+- Two things that may be worth a look: on KDD and Shuttle many final centroids are nearest to no training row (~320 of 4096 on KDD, on GPU too), and on CPU only, `faiss.knn` with k=2 is very slow in one low-dimension case (75 ms against 0.8 ms for k=1).
 
 I didn't dig into these two. Details below, and I can run more cases if that helps.
 
@@ -64,7 +64,20 @@ The GPU columns for faiss are `Emeans` with BF16 operands on both sides. The cos
 
 -----
 
-**The top-2 search has a slow case in low dimension.** With 65,536 queries, 1024 centroids and d=3, `faiss.knn(x, c, 2)` takes 75 ms against 0.8 ms for `k=1`. With 32,768 queries there is no gap:
+**On KDD Cup 99 and Shuttle, many final centroids are nearest to no training row.** The training rows are assigned to the returned centroids (exact search) and the centroids that get none are counted. Mean of 3 seeds, 5 epochs:
+
+| | cost-based | `unused_threshold=0.1` |
+| --- | --- | --- |
+| KDD (1.05M x 122), k=1024 | 45 | 3 |
+| KDD, k=4096 | 318 | 5 |
+| Shuttle (38k x 9), k=256 | 34 | 0 |
+| Shuttle, k=1024 | 258 | 1 |
+
+On the other six datasets it is 0, or a handful at k=4096 on GeoNames. I don't know if these centroids are duplicates or centroids that the closing pass left at their running position.
+
+-----
+
+**On CPU, the top-2 search has a slow case in low dimension.** With 65,536 queries, 1024 centroids and d=3, `faiss.knn(x, c, 2)` takes 75 ms against 0.8 ms for `k=1`. With 32,768 queries there is no gap:
 
 ```python
 import time, numpy as np, faiss
@@ -95,19 +108,6 @@ d=18 nq=65536 top-1: 25.5 ms
 d=18 nq=65536 top-2: 56.2 ms
 ```
 
-On the road network at k=1024, the batch is 32,768 rows with 5 epochs and 65,536 with 10. The cost-based fit then takes 5.4 s with 5 epochs and 45 s with 10, against 3.6 s for `unused_threshold=0.1` with 10. I didn't look at which code path each case takes.
-
------
-
-**On KDD Cup 99 and Shuttle, many final centroids are nearest to no training row.** The training rows are assigned to the returned centroids (exact search) and the centroids that get none are counted. Mean of 3 seeds, 5 epochs:
-
-| | cost-based | `unused_threshold=0.1` |
-| --- | --- | --- |
-| KDD (1.05M x 122), k=1024 | 45 | 3 |
-| KDD, k=4096 | 318 | 5 |
-| Shuttle (38k x 9), k=256 | 34 | 0 |
-| Shuttle, k=1024 | 258 | 1 |
-
-On the other six datasets it is 0, or a handful at k=4096 on GeoNames. I don't know if these centroids are duplicates or centroids that the closing pass left at their running position.
+On the road network at k=1024, the batch is 32,768 rows with 5 epochs and 65,536 with 10. The cost-based fit then takes 5.4 s with 5 epochs and 45 s with 10, against 3.6 s for `unused_threshold=0.1` with 10. I didn't look at which code path each case takes. This is specific to `faiss.knn` on CPU: on GPU (Triton), the same case (batch of 65,536, k=1024, d=3) takes 0.41 s with the cost-based rule against 0.33 s with the mass-based one, and no case is above 1.6x.
 
 </details>

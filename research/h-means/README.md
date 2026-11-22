@@ -271,11 +271,132 @@ Random init with more epochs, against 5 epochs:
 and `scripts/xeon_v6_init2.sh`. The other socket was busy during these runs:
 the timings are indicative.
 
+### With `EMeans(assignment="two-level")`, and more datasets
+
+Same question with the estimator of `main` (0.4.1, ratio 1.2) instead of the
+prototype, the inits rewritten with NumPy, and datasets where the init
+matters: RCV1 reduced to 128 dimensions by LSA (804k samples), covtype
+(581k, 54 features), the numerical features of KDD Cup 99 (4.9M, 37), and
+1M samples in 64 dimensions drawn from exactly `k` Gaussian blobs, of equal
+sizes (blobs) or with sizes in `1 / rank` (Zipf blobs).
+
+Short answer: on the embeddings the conclusions hold. Where the init matters
+a lot, the cheap inits get a part of the gain of `k-means||` but not all of
+it, and the allocation by inertia is not always safe.
+
+| name | init |
+|---|---|
+| `stratified`, `stratified-inertia` | As above. A non-empty group gets at least one center. |
+| `kpp`, `kpp-inertia` | k-means++ inside each group on 16 candidates per center, `k_j` proportional to the size or to the inertia of the group. |
+| `kpp-t4`, `kpp-inertia-t4` | Same, greedy: best of 4 draws per step. |
+| `sub-10` | Two epochs of the two-level `EMeans` on a 10% subsample (at least `10 k` samples). |
+| `k-means\|\|` | `init="k-means||"` of `EMeans`, in `O(n k)`. |
+
+Exact inertia (`-score(X)`) after 5 epochs, against the random init. Median
+over the seeds: 3 for SIFT, GloVe and CLIP, 2 for DEEP 10M at `k=10k`, 1 at
+`k=100k`, 5 for the others. The column gives the dataset and `k`.
+
+| init | SIFT 1M, 10k | GloVe 1.2M, 10k | DEEP 10M, 10k | DEEP 10M, 100k | CLIP 1M, 10k | CLIP 1M, 1024 |
+|---|---|---|---|---|---|---|
+| `stratified` | -0.00% | +0.01% | -0.00% | -0.00% | -0.00% | -0.06% |
+| `stratified-inertia` | -0.01% | +0.03% | -0.02% | -0.09% | -0.28% | -0.32% |
+| `kpp` | -0.00% | +0.01% | -0.00% | -0.02% | -0.18% | -0.09% |
+| `kpp-inertia` | -0.02% | -0.00% | +0.00% | -0.10% | -0.35% | -0.23% |
+| `kpp-t4` |  |  |  |  | -0.29% | -0.16% |
+| `kpp-inertia-t4` |  |  |  |  | -0.52% | -0.36% |
+| `sub-10` | -0.04% | -0.02% | -0.04% | -0.03% | -0.12% | -0.16% |
+| `k-means||` | -0.04% | -0.01% | -0.04% | -0.16% | -0.52% | -0.30% |
+| `random`, 6 epochs | -0.05% | -0.13% | -0.05% | -0.16% | +0.04% | -0.06% |
+| `random`, 8 epochs | -0.28% | -0.27% | +0.05% | -0.39% | -0.23% | -0.10% |
+| `random`, 10 epochs | -0.43% | -0.36% | -0.01% | -0.53% | -0.37% | +0.10% |
+
+| init | RCV1 LSA, 1024 | RCV1 LSA, 4096 | covtype, 1024 | KDD Cup 99, 1024 | blobs, 1024 | blobs, 10k | Zipf blobs, 1024 |
+|---|---|---|---|---|---|---|---|
+| `stratified` | -0.3% | -0.2% | -1.6% | -11.7% | +5.6% | -0.4% | -3.8% |
+| `stratified-inertia` | -0.4% | -0.4% | +4.8% | -15.2% | +2.6% | +0.9% | -34.0% |
+| `kpp` | -0.3% | -0.1% | -2.7% | -7.8% | -41.2% | -23.1% | -12.0% |
+| `kpp-inertia` | -0.5% | -0.5% | +2.0% | -4.0% | -43.9% | -23.6% | -49.4% |
+| `kpp-t4` | -0.6% | -0.6% | -4.2% | -4.9% | -65.0% | -46.6% | -18.2% |
+| `kpp-inertia-t4` | -0.9% | -0.8% | +2.2% | -3.1% | -64.2% | -46.9% | -54.4% |
+| `sub-10` | -0.5% | -0.1% | -0.3% | -6.4% | -15.6% | +33.0% | -10.5% |
+| `k-means||` | -1.0% | -0.9% | -5.3% | -7.3% | -73.9% | -66.5% | -62.7% |
+| `random`, 6 epochs | -0.1% | -0.1% | +0.0% | -1.5% | -3.3% | -1.9% | -0.0% |
+| `random`, 8 epochs | -0.3% | -0.3% | -1.2% | -10.6% | -8.4% | -8.4% | +0.2% |
+| `random`, 10 epochs | -0.3% | -0.2% | +0.0% | -9.2% | +21.5% | -12.0% | +1.8% |
+
+Time of the init, in seconds (median), with the time of the fit with the
+random init on the last line. For `k-means||` it is the difference with the
+fit with the random init. One socket, 64 threads, and the other socket was
+busy: the timings are indicative.
+
+| init | SIFT 1M, 10k | GloVe 1.2M, 10k | DEEP 10M, 10k | DEEP 10M, 100k | CLIP 1M, 10k | CLIP 1M, 1024 |
+|---|---|---|---|---|---|---|
+| `stratified` | 0.18 | 0.23 | 1.47 | 1.31 | 0.25 | 0.27 |
+| `stratified-inertia` | 0.21 | 0.29 | 1.74 | 1.62 | 0.39 | 0.42 |
+| `kpp` | 3.92 | 3.70 | 4.69 | 44 | 3.51 | 0.47 |
+| `kpp-inertia` | 3.44 | 3.56 | 4.92 | 48 | 3.54 | 0.60 |
+| `kpp-t4` |  |  |  |  | 5.53 | 0.62 |
+| `kpp-inertia-t4` |  |  |  |  | 5.46 | 0.79 |
+| `sub-10` | 0.32 | 0.41 | 0.64 | 1.41 | 0.61 | 0.31 |
+| `k-means||` | 5.25 | 11 | 15 | 268 | 11 | 0.68 |
+| fit, 5 epochs | 0.92 | 2.13 | 5.38 | 12.27 | 2.03 | 1.24 |
+
+| init | RCV1 LSA, 1024 | RCV1 LSA, 4096 | covtype, 1024 | KDD Cup 99, 1024 | blobs, 1024 | blobs, 10k | Zipf blobs, 1024 |
+|---|---|---|---|---|---|---|---|
+| `stratified` | 0.15 | 0.15 | 0.09 | 0.90 | 0.15 | 0.16 | 0.15 |
+| `stratified-inertia` | 0.18 | 0.17 | 0.12 | 1.08 | 0.19 | 0.18 | 0.19 |
+| `kpp` | 0.33 | 1.16 | 0.21 | 1.04 | 0.31 | 3.08 | 0.32 |
+| `kpp-inertia` | 0.35 | 1.27 | 0.24 | 1.20 | 0.32 | 3.13 | 0.32 |
+| `kpp-t4` | 0.50 | 2.05 | 0.37 | 1.21 | 0.54 | 5.89 | 0.49 |
+| `kpp-inertia-t4` | 0.54 | 1.98 | 0.35 | 1.29 | 0.59 | 5.50 | 0.46 |
+| `sub-10` | 0.15 | 0.20 | 0.10 | 0.29 | 0.16 | 0.35 | 0.14 |
+| `k-means||` | 0.28 | 1.61 | 0.21 | 0.91 | 0.26 | 3.33 | 0.33 |
+| fit, 5 epochs | 0.53 | 0.58 | 0.39 | 1.40 | 0.74 | 1.11 | 0.47 |
+
+- Embeddings: same picture as with the prototype. `stratified-inertia` gains
+  0.3% on CLIP and nothing on SIFT, GloVe and DEEP. Its init takes 0.2 s to
+  0.4 s on the 1M sets and 1.7 s on DEEP 10M: the inertia of the groups adds
+  0.03 s to 0.3 s to `stratified`.
+- `kpp-inertia-t4` matches `k-means||` on CLIP (-0.52% for both at `k=10k`)
+  and nearly on RCV1 (-0.8% to -0.9% against -0.9% to -1.0%).
+- On the blobs, the sampling inside the groups is what matters: `stratified`
+  gains nothing, `kpp` 23% to 41%, `kpp-t4` 47% to 65%, `k-means||` 67% to
+  74%. On the Zipf blobs the allocation matters too: `stratified-inertia`
+  alone gains 34%, `kpp-inertia-t4` 54%, `k-means||` 63%.
+- The allocation by inertia is not always safe: on covtype it is 2% to 5%
+  worse than random, when the allocation by size is 2% to 4% better.
+- covtype and KDD Cup 99 are noisy. On covtype some fits find a solution
+  with about 40% less inertia, with several inits (2 of 5 seeds for random
+  with 10 epochs, 1 of 5 for `k-means||`, `sub-10` and `kpp-t4`). On KDD Cup
+  99 the range over the seeds is 10 to 20 points for most inits: the ranking
+  of the inits there says little.
+- `sub-10` needs enough samples per cluster: with 10 samples per cluster in
+  the subsample (blobs at `k=10k`), it is 33% worse than random.
+- More epochs do not replace the init on these datasets, and can hurt: on
+  the blobs at `k=1024`, 10 epochs are 22% worse than 5 with the random init.
+- The times of the `kpp` inits are those of a Python loop with one step per
+  center (3.5 s at `k=10k`, 44 s at `k=100k`), not of their dot products
+  (`16 k` candidates, about `k / g` steps each, so `16 k / n` of the dot
+  products of the coarse pass, and 5 times that with 4 trials).
+- At `k=1024`, `k-means||` takes 0.2 s to 0.9 s, about as much as the cheap
+  inits: an init in `O(n sqrt(k))` only pays off above `k ~ 10k`, where
+  `k-means||` takes 3 to 22 times the fit (268 s against 12 s on DEEP 10M at
+  `k=100k`).
+
+Side observation: on KDD Cup 99, the inertia of the two-level labels
+(`inertia_`) is up to 14% above the exact one for some fits (median 0.1%).
+It is at most 0.3% on all the other datasets.
+
+`init_exp2.py` runs this study, `init_show2.py` prints the tables from
+`results/xeon/init/emeans.jsonl`. The commands are in
+`scripts/xeon_v7_init.sh` and `scripts/xeon_v7_init2.sh`.
+
 ## Limits
 
 - One seed per configuration, one machine per device type.
 - All the datasets are dense embeddings with 96 to 512 dimensions.
-- The init study covers the same four datasets, with 1 to 3 seeds.
+- The init study has 1 to 5 seeds per case, and its timings were taken with
+  the other socket busy.
 - `g = sqrt(k)` and the probing parameters were tuned by hand on these
   datasets.
 

@@ -1,3 +1,4 @@
+import math
 import subprocess
 import sys
 
@@ -636,6 +637,41 @@ def test_emeans_cost_based_revival_does_not_depend_on_n_threads():
         centers_sequential = emeans.fit(X).cluster_centers_
     centers_parallel = emeans.fit(X).cluster_centers_
     assert_array_equal(centers_sequential, centers_parallel)
+
+
+@pytest.mark.parametrize(
+    "n_samples, n_epochs, n_steps, n_calls",
+    [
+        # A number of steps that is a multiple of 5: no revival after the last.
+        (3200, 1, 50, 9),
+        (3200, 1.5, 75, 14),
+        (3200, 5, 65, 12),
+        # The other ones: a revival every 5 steps.
+        (3000, 1.5, 71, 14),
+        (3000, 2, 48, 9),
+    ],
+)
+def test_emeans_cost_based_revival_not_after_last_step(
+    monkeypatch, n_samples, n_epochs, n_steps, n_calls
+):
+    # A cluster split after the last step would get no sample, and its two
+    # halves would end at the positions of the split.
+    calls = []
+
+    def revive(*args):
+        calls.append(None)
+        return 0
+
+    monkeypatch.setattr(_emeans, "_revive_cheap_clusters", revive)
+    X, _ = make_blobs(n_samples=n_samples, n_features=20, centers=10, random_state=0)
+    emeans = EMeans(
+        n_clusters=10, revival="cost-based", n_epochs=n_epochs, random_state=0
+    ).fit(X)
+    epochs_n_rows = _emeans._epochs_n_rows(n_samples, n_epochs)
+    assert n_steps == sum(
+        math.ceil(n_rows / emeans.batch_size_) for n_rows in epochs_n_rows
+    )
+    assert len(calls) == n_calls
 
 
 def test_emeans_cost_based_revival_one_cluster():

@@ -6,8 +6,13 @@ folder compares it with the revivals of `EMeans` on the datasets where the
 revival matters: three of the k-means Pareto benchmark of scikit-learn-benchmarks
 and the five tabular datasets of the PR thread.
 
-Run on 2026-11-22: faiss built at the PR head `ba7781af`, sklearn-contrib-emeans
-0.4.1 from PyPI, Core Ultra 9 285 (24 threads), 3 seeds per case.
+Run on 2026-11-22, 3 seeds per case, sklearn-contrib-emeans 0.4.1 from PyPI:
+
+- CPU: faiss built at the PR head `ba7781af` (`NumpyEmeans`), Core Ultra 9 285
+  (24 threads).
+- GPU: NVIDIA L4 (8 vCPUs), PyTorch 2.13, Triton 3.7.1, the `contrib/e_means`
+  of `ba7781af` on top of the faiss 1.16.0 wheel (`Emeans`, Triton backend).
+  Same datasets without SUSY.
 
 ## TLDR
 
@@ -29,8 +34,20 @@ Run on 2026-11-22: faiss built at the PR head `ba7781af`, sklearn-contrib-emeans
   cost-based fits on the road network at k=1024 and 10 epochs take 45 s,
   against 3.6 s with the mass-based revival.
 
-All the tables are in [results/tables.md](results/tables.md), the raw runs in
-`results/results.jsonl`.
+- Cost: the cost-based rule adds 30 to 50% to the fit time of `NumpyEmeans`
+  and 10 to 25% to the GPU `Emeans`, at any k. Greedy adds ~30% up to k=1024
+  on CPU, ~2x at k=4096, and it is quadratic in k. On GPU greedy runs on the
+  host and dominates the fit: 18x the fit time at k=4096 (median).
+- On GPU the quality is the same as on CPU, and BF16 operands show no effect
+  (the mass-based `Emeans` in BF16 and `QuantizedEmeans` in FP32 give the same
+  inertia). The cost-based rule only exists in `Emeans` (BF16 on a CUDA FP32
+  input): `QuantizedEmeans(quantizer=None)` keeps the mass-based default.
+
+All the tables are in [results/tables.md](results/tables.md) (CPU) and
+[results/tables_gpu.md](results/tables_gpu.md) (GPU), the raw runs in
+`results/results.jsonl` and `results/results_gpu.jsonl`.
+[faiss_pr_comment_draft.md](faiss_pr_comment_draft.md) is the draft of a comment
+for the PR.
 
 ## What is compared
 
@@ -56,7 +73,15 @@ All the tables are in [results/tables.md](results/tables.md), the raw runs in
 The inertia of every run is recomputed from the final centers in float64, with
 an exact assignment.
 
+On GPU (`bench_gpu.py`), the variants are the same, with `Emeans` for the PR
+(BF16 operands), plus `QuantizedEmeans(quantizer=None)` (FP32, mass-based), and
+`EMeans` on PyTorch CUDA tensors with `array_api_dispatch=True`.
+
 ## Caveats
+
+- On GPU, the fit time of "PR cost, km||" includes our k-means|| called
+  outside of `EMeans.fit`, without its BLAS limit: it is not meaningful (41 s
+  at k=4096 on Census, against ~1.5 s inside `EMeans`).
 
 - 3 seeds per case, and the two libraries draw different random starts.
 - KDD and Shuttle are heavy-tailed: their means move a lot with one seed. The
@@ -79,6 +104,16 @@ pixi run bash build.sh        # faiss at the PR head, with its Python bindings
 bash prep.sh > prep.log 2>&1  # datasets of the PR thread
 benchlock --tag "revival comparison" all -- bash run_all.sh
 python analyze.py > results/tables.md
+```
+
+The GPU run reuses an existing PyTorch environment (the root disk of the VM was
+full), with `pip install --no-deps --target overlay faiss-cpu==1.16.0
+sklearn-contrib-emeans==0.4.1`, the `contrib/` of the PR in `pr/contrib`, and
+the datasets as `.npy` files in `npy/` and `data/`:
+
+```
+benchlock --tag "revival comparison, GPU" all -- bash run_gpu.sh
+python analyze.py gpu > results/tables_gpu.md
 ```
 
 `pixi.toml` asks for the pthreads build of OpenBLAS: with the OpenMP one, the

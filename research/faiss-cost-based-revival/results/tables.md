@@ -292,3 +292,12 @@
 | year_prediction_msd_standardized | 1024 | 2 | 1.57 | 1.15 | 1.79 | 0.322 | 0.677 | 0.597 | 0.95 |
 | year_prediction_msd_standardized | 1024 | 5 | 3.28 | 2.25 | 3.63 | 0.615 | 1.1 | 0.89 | 1.37 |
 | year_prediction_msd_standardized | 1024 | 10 | 6.3 | 4.32 | 6.66 | 1.12 | 1.61 | 1.41 | 1.92 |
+
+**Fit time ratio: median over the datasets and budgets (min to max)**
+
+| k | PR cost / PR mass | EM greedy / EM 0.1 |
+| --- | --- | --- |
+| 64 | 1.27 (1.10 to 1.37) | 1.27 (1.07 to 3.35) |
+| 256 | 1.32 (1.15 to 1.54) | 1.32 (1.10 to 1.76) |
+| 1024 | 1.41 (0.97 to 12.33) | 1.22 (1.03 to 2.10) |
+| 4096 | 1.50 (0.89 to 1.58) | 2.22 (1.74 to 3.16) |

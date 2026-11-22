@@ -1,4 +1,6 @@
-Thanks for this PR! I had my agent benchmark the cost-based revival (`NumpyEmeans` at ba7781a) against the mass-based one, and against the `revival="greedy"` of [sklearn-contrib-emeans](https://github.com/cakedev0/sklearn-contrib-emeans), which is built on the same idea (removal cost against split gain) but estimates both on a sample, with trial 2-means splits. 8 datasets, 3 seeds, on CPU (`NumpyEmeans`) and on an L4 GPU (`Emeans`, Triton).
+Nice improvement! I had also noticed the revival policy was not always great, so I had Claude implemeny a `revival="greedy"` policy of [sklearn-contrib-emeans](https://github.com/cakedev0/sklearn-contrib-emeans). It is built on the same idea (removal cost against split gain) but estimates both on a sample, with trial 2-means splits.
+
+I had my agent benchmark the cost-based revival (`NumpyEmeans` at ba7781a) against the mass-based one, and against my `revival="greedy"`. 8 datasets, 3 seeds, on CPU (`NumpyEmeans`) and on an L4 GPU (`Emeans`, Triton).
 
 From these runs:
 

@@ -3,6 +3,7 @@ Thanks for this PR! I had my agent benchmark the cost-based revival (`NumpyEmean
 From these runs:
 
 - The cost-based rule seems to remove most of the gap that the mass-based revival leaves (16-18% of inertia on a 3-D road network), and it ends within ~1% of greedy on most datasets. It looks better than greedy on KDD Cup 99 up to k=1024, and worse at k=4096.
+- It also scales better: it adds 30 to 50% to the fit time at any k, while greedy is quadratic in k (~2x the fit time at k=4096). So I think the cost-based approach is the better one.
 - A k-means|| init still seems useful on top of it: 0.5 to 4% lower inertia on the road network, Census and household power.
 - Two things that may be worth a look: the top-2 search is very slow in one low-dimension case (75 ms against 0.8 ms for top-1), and on KDD and Shuttle many final centroids are nearest to no training row (~320 of 4096 on KDD).
 
@@ -48,7 +49,16 @@ The held-out error of Shuttle depends on one test row far from all the training 
 
 **k-means|| on top of the cost-based rule.** In the first table, the k-means|| start lowers the inertia of the cost-based fits by 0.5 to 4% on the road network, Census, household power and SUSY at k=64, and changes little on MSD and KDD. So the cost-based rule recovers most of a bad random start, not all of it.
 
-**Fit time of the rule.** The cost-based fits take 1.2 to 1.6 times the mass-based ones in `NumpyEmeans` (for example 5.8 s against 4.4 s on the road network at k=64 with 10 epochs), apart from the slow case below.
+**Fit time of each rule.** Ratio of the fit time to the mass-based revival of the same library, median over the datasets and budgets (range in parentheses):
+
+| k | faiss cost-based / faiss mass 0.1 | greedy / `revival=0.1` |
+| --- | --- | --- |
+| 64 | 1.27 (1.10 to 1.37) | 1.27 (1.07 to 3.35) |
+| 256 | 1.32 (1.15 to 1.54) | 1.32 (1.10 to 1.76) |
+| 1024 | 1.41 (0.97 to 1.54, and 12 in the slow case below) | 1.22 (1.03 to 2.10) |
+| 4096 | 1.50 (0.89 to 1.58) | 2.22 (1.74 to 3.16) |
+
+The cost-based rule adds work to every step (top-2 instead of top-1, and statistics in O(batch x d)), so its ratio doesn't depend on the size. Greedy adds 5 to 15 revivals per fit, each an exact assignment of a sample of max(131072, 256 k) rows: almost free when the data is much larger than the sample (+0.2 s on SUSY at k=1024), about one more fit at k=4096 (+6 s on Census and KDD), and quadratic in k. The faiss ratio is measured in `NumpyEmeans`, where the steps have other costs than the search.
 
 -----
 

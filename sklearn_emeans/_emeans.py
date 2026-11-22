@@ -55,6 +55,10 @@ _REVIVAL_PERIOD = 5
 # fraction of the mean EMA weight.
 _DEAD_CLUSTER_THRESHOLD = 0.1
 
+# revival="cost-based": a cluster is cheap to remove when the EMA of its removal
+# cost is below this fraction of the median over the clusters.
+_REMOVAL_COST_THRESHOLD = 0.3
+
 # Relative perturbation of the two halves of a split donor center.
 _SPLIT_EPSILON = 1e-4
 
@@ -371,15 +375,94 @@ def _split_centers(donor_centers):
     offset[1::2] *= -1
     dead_centers = donor_centers * (1 + offset)
     donor_centers = donor_centers * (1 - offset)
+    # A null center would give two identical halves.
+    _separate_identical_halves(dead_centers, donor_centers)
+    return dead_centers, donor_centers
 
-    # A null center would give two identical halves: separate them along the
-    # first feature.
+
+def _separate_identical_halves(dead_centers, donor_centers):
+    """Move the dead centers equal to their donor along the first feature."""
     same = (dead_centers == donor_centers).all(axis=1)
     if same.any():
         dead_centers[same, 0] = np.nextafter(
             dead_centers[same, 0], donor_centers.dtype.type(np.inf)
         )
-    return dead_centers, donor_centers
+
+
+def _revive_cheap_clusters(
+    centers,
+    weight_ema,
+    removal_cost,
+    axis_sums,
+    axes,
+    epoch_sums=None,
+    epoch_counts=None,
+):
+    """Move the clusters that are cheap to remove to split the longest ones.
+
+    The revival of `revival="cost-based"`, inplace. `removal_cost`,
+    `axis_sums` and `axes` are the statistics that the steps keep for it, see
+    `_removal_update` in `_kernels.pyx`.
+
+    A cluster is cheap when its removal cost is null, or below
+    `_REMOVAL_COST_THRESHOLD` times the median one. The cheap clusters, the
+    cheapest first, each take half of a donor: the other clusters, the one
+    with the largest norm of the axis sums first. The two halves of a donor
+    are at its center -/+ s u, where u is its axis and s the mean of a
+    half-normal distribution that has the variance of the cluster along its
+    axis, estimated as ||U|| / N. They share its weight and its statistics.
+
+    In the last epoch, `epoch_sums` and `epoch_counts` are given: the two
+    halves forget the rows of the epoch that they got before the split, so
+    that their final centers are the means of the rows they got after it.
+
+    Returns the number of revived clusters.
+    """
+    indices = _cost_based_revival_indices(removal_cost, weight_ema, axis_sums)
+    if indices is None:
+        return 0
+    cheap_indices, donor_indices = indices
+
+    norms = np.linalg.norm(axis_sums[donor_indices], axis=1)
+    with np.errstate(over="ignore", invalid="ignore"):
+        spread = np.sqrt(2 * norms / (np.pi * weight_ema[donor_indices]))
+    spread[~np.isfinite(spread)] = 0
+    offsets = spread[:, None] * axes[donor_indices]
+    donor_centers = centers[donor_indices].astype(np.float64)
+    cheap_centers = (donor_centers + offsets).astype(centers.dtype)
+    donor_centers = (donor_centers - offsets).astype(centers.dtype)
+    # A null offset would give two identical halves.
+    _separate_identical_halves(cheap_centers, donor_centers)
+    centers[cheap_indices] = cheap_centers
+    centers[donor_indices] = donor_centers
+
+    for stats in (weight_ema, removal_cost, axis_sums):
+        stats[donor_indices] /= 2
+        stats[cheap_indices] = stats[donor_indices]
+    axes[cheap_indices] = axes[donor_indices]
+    if epoch_sums is not None:
+        for stats in (epoch_sums, epoch_counts):
+            stats[cheap_indices] = 0
+            stats[donor_indices] = 0
+    return len(cheap_indices)
+
+
+def _cost_based_revival_indices(removal_cost, weight_ema, axis_sums):
+    """Indices of the cheap clusters to move and of their donors, or None."""
+    cheap = (removal_cost <= 0) | (
+        removal_cost < _REMOVAL_COST_THRESHOLD * np.median(removal_cost)
+    )
+    cheap_indices = np.flatnonzero(cheap)
+    donor_indices = np.flatnonzero(~cheap & (weight_ema > 0))
+    n_revived = min(len(cheap_indices), len(donor_indices))
+    if n_revived == 0:
+        return None
+    cheap_indices = cheap_indices[
+        np.argsort(removal_cost[cheap_indices], kind="stable")
+    ]
+    norms = np.linalg.norm(axis_sums[donor_indices], axis=1)
+    donor_indices = donor_indices[np.argsort(-norms, kind="stable")]
+    return cheap_indices[:n_revived], donor_indices[:n_revived]
 
 
 class EMeans(
@@ -437,7 +520,7 @@ class EMeans(
         `n_epochs > 1`, the fractional pass comes before the last epoch, which
         is always a full pass.
 
-    revival : float in [0, 0.5] or 'greedy', default=0.1
+    revival : float in [0, 0.5], 'greedy' or 'cost-based', default=0.1
         How clusters are revived during the fit:
 
         If a float, every 5 steps, a cluster is dead when its weight (an
@@ -462,9 +545,24 @@ class EMeans(
         small clusters that are worth keeping and usually gives a lower
         inertia, for a longer fit.
 
+        'cost-based': every 5 steps, a cluster is replaced by half of another
+        one when it is cheap to remove: its removal cost is null, or below
+        0.3 times the median one. The removal cost of a cluster is how much
+        the inertia would grow if its samples went to their second nearest
+        center instead. The steps estimate it, and they also follow the
+        direction in which each cluster is the longest: the clusters that are
+        split are the longest ones, and they are split along this direction.
+        A cluster split during the last epoch ends at the mean of the samples
+        it got after its last split. This revival also applies when
+        `n_features <= 2`. It is the default one of the reference
+        implementation since `pull request 5915 of faiss
+        <https://github.com/facebookresearch/faiss/pull/5915>`_, without its
+        reassignment of the samples of the last epoch. It is only supported
+        for NumPy arrays and sparse matrices, with `assignment='exact'`.
+
         .. warning::
-            'greedy' is experimental: its algorithm may change from one
-            version to the next, and its results with it.
+            'greedy' and 'cost-based' are experimental: their algorithms may
+            change from one version to the next, and their results with them.
 
     assignment : {'exact', 'two-level'}, default='exact'
         How the samples are assigned to their center during the fit:
@@ -628,7 +726,7 @@ class EMeans(
                 f"n_epochs must be a finite float > 0, got {self.n_epochs!r}."
             )
         if isinstance(self.revival, str):
-            valid_revival = self.revival == "greedy"
+            valid_revival = self.revival in ("greedy", "cost-based")
         else:
             valid_revival = (
                 isinstance(self.revival, Real)
@@ -637,7 +735,7 @@ class EMeans(
             )
         if not valid_revival:
             raise ValueError(
-                "revival must be a float in [0, 0.5] or 'greedy', got "
+                "revival must be a float in [0, 0.5], 'greedy' or 'cost-based', got "
                 f"{self.revival!r}."
             )
         if not isinstance(self.assignment, str) or self.assignment not in (
@@ -717,6 +815,9 @@ class EMeans(
 
     def _revival_period(self, n_features):
         """Number of steps between two revivals of the dead clusters, or 0."""
+        if self.revival == "cost-based":
+            # Without a second center, there is no removal cost.
+            return _REVIVAL_PERIOD if self.n_clusters > 1 else 0
         if (
             isinstance(self.revival, str)
             or self.revival == 0
@@ -768,7 +869,16 @@ class EMeans(
                     "assignment='two-level' is not supported for array API "
                     "inputs with array_api_dispatch=True."
                 )
+            if self.revival == "cost-based":
+                raise ValueError(
+                    "revival='cost-based' is not supported for array API "
+                    "inputs with array_api_dispatch=True."
+                )
             return self._fit_array_api(xp, X)
+        if self.revival == "cost-based" and self.assignment == "two-level":
+            raise ValueError(
+                "revival='cost-based' is not supported with assignment='two-level'."
+            )
         X = _validate_data(self, X)
         if self.assignment == "two-level" and sp.issparse(X):
             raise ValueError("assignment='two-level' is not supported for sparse X.")
@@ -831,6 +941,22 @@ class EMeans(
             self.revival,
             cell_of_center,
         )
+        cost_based = self.revival == "cost-based" and revival_period > 0
+        if cost_based:
+            # The statistics that the steps keep for the revival: see
+            # `_removal_update` in `_kernels.pyx`. The axes start from random
+            # directions.
+            removal_cost = np.zeros(n_clusters)
+            axis_sums = np.zeros((n_clusters, n_features))
+            axes = random_state.standard_normal((n_clusters, n_features))
+            axes /= np.linalg.norm(axes, axis=1, keepdims=True)
+            axes = axes.astype(X.dtype)
+            emeans_steps = partial(
+                emeans_steps,
+                removal_cost=removal_cost,
+                axis_sums=axis_sums,
+                axes=axes,
+            )
         greedy = self._greedy_revival(
             X,
             lambda X, indices: X if indices is None else X[indices],
@@ -851,6 +977,17 @@ class EMeans(
                         for i in range(n_epoch_steps)
                     ]
                 )
+                if cost_based:
+                    revive = partial(
+                        _revive_cheap_clusters,
+                        centers,
+                        weight_ema,
+                        removal_cost,
+                        axis_sums,
+                        axes,
+                        epoch_sums if is_last_epoch else None,
+                        epoch_counts if is_last_epoch else None,
+                    )
                 # All the steps of the epoch in one call, which revives the
                 # dead clusters every `revival_period` steps: see `_run_steps`
                 # in `_kernels.pyx`. The greedy revival runs between two

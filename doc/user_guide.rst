@@ -37,7 +37,8 @@ an iteration of Lloyd's algorithm. Around this update:
   tenth of the mean one, are revived: each takes half of a heavier cluster,
   which is split in two. Clusters are not revived on data with 1 or 2 features
   (see :ref:`this example <sphx_glr_auto_examples_plot_init_and_revival.py>`).
-  The `revival` parameter sets this threshold (0 for no revival).
+  The `revival` parameter sets this threshold (0 for no revival), or another
+  rule: `"greedy"` or `"cost-based"`, both experimental.
 - At the end of the last epoch, each center is set to the mean of the samples
   assigned to it during that epoch.
 - `labels_` and `inertia_` are then computed with one more pass over the data,

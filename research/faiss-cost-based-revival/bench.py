@@ -97,6 +97,7 @@ parser.add_argument(
 parser.add_argument("--k", nargs="+", type=int, default=[64, 256, 1024])
 parser.add_argument("--epochs", nargs="+", type=float, default=[2, 5, 10])
 parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
+parser.add_argument("--variants", nargs="+", default=list(VARIANTS))
 parser.add_argument("--out", default="results/results.jsonl")
 args = parser.parse_args()
 
@@ -108,11 +109,24 @@ with open(args.out, "a") as out:
         # Warm-up of both libraries.
         run_faiss(X[:100_000], 64, 1, 0)
         run_emeans(X[:100_000], 64, 1, 0)
+        from threadpoolctl import threadpool_info
+
+        for m in threadpool_info():
+            print(
+                m["user_api"],
+                m["internal_api"],
+                m.get("threading_layer"),
+                m["num_threads"],
+                m["filepath"],
+                file=sys.stderr,
+                flush=True,
+            )
         for k in args.k:
             for n_epochs in args.epochs:
                 n_epochs = int(n_epochs) if float(n_epochs).is_integer() else n_epochs
                 for seed in args.seeds:
-                    for name, run in VARIANTS.items():
+                    for name in args.variants:
+                        run = VARIANTS[name]
                         centers, elapsed, extra = run(X, k, n_epochs, seed)
                         inertia, n_empty = inertia_per_sample(X, centers)
                         record = {

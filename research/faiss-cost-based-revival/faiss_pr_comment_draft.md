@@ -78,4 +78,3 @@ The GPU columns for faiss are `Emeans` with BF16 operands on both sides. The cos
 On the other six datasets it is 0, or a handful at k=4096 on GeoNames. I don't know if these centroids are duplicates or centroids that the closing pass left at their running position.
 
 </details>
-

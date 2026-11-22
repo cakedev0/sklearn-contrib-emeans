@@ -29,13 +29,18 @@ Run on 2026-11-22, 3 seeds per case, sklearn-contrib-emeans 0.4.1 from PyPI:
 - On KDD and Shuttle, the PR's rule ends with many centers that are nearest to
   no training row: ~320 of 4096 on KDD and ~260 of 1024 on Shuttle at 5 epochs,
   against 0 to 1 for greedy.
-- faiss's new top-2 search has a slow case: 75 ms against 0.8 ms for top-1 with
-  65,536 queries, 1024 centers and 3 features (`knn.py`). It makes the
-  cost-based fits on the road network at k=1024 and 10 epochs take 45 s,
-  against 3.6 s with the mass-based revival.
-
-- Cost: the cost-based rule adds 30 to 50% to the fit time of `NumpyEmeans`
-  and 10 to 25% to the GPU `Emeans`, at any k. Greedy adds ~30% up to k=1024
+- The first CPU run had a slow case that does not come from the PR: with
+  65,536 queries, 1024 centers and 3 features, `faiss.knn` took 75 ms for k=2
+  against 0.8 ms for k=1 (`knn.py`). My build had the pthreads OpenBLAS next to
+  OpenMP, and the two thread pools compete for the cores in the BLAS path of
+  the search (faiss at the merge-base is as slow). With one pool (the OpenMP
+  build of OpenBLAS), it takes 12.6 ms. What remains is that k=1 has a fused
+  kernel without BLAS for d <= 16 and k=2 doesn't: the cost-based fit on the
+  road network at k=1024 with 10 epochs still takes 14 s against 3.4 s for the
+  mass-based one (45 s against 3.6 s with two pools).
+- Cost: the cost-based rule adds ~25% to the fit time of `NumpyEmeans` with
+  one thread pool (`results/results_one_pool.jsonl`; 30 to 50% in the first
+  run with two pools) and 10 to 25% to the GPU `Emeans`, at any k. Greedy adds ~30% up to k=1024
   on CPU, ~2x at k=4096, and it is quadratic in k. On GPU greedy runs on the
   host and dominates the fit: 18x the fit time at k=4096 (median).
 - On GPU the quality is the same as on CPU, and BF16 operands show no effect
@@ -77,6 +82,19 @@ On GPU (`bench_gpu.py`), the variants are the same, with `Emeans` for the PR
 (BF16 operands), plus `QuantizedEmeans(quantizer=None)` (FP32, mass-based), and
 `EMeans` on PyTorch CUDA tensors with `array_api_dispatch=True`.
 
+The faiss variants were run a second time on CPU with the OpenMP build of
+OpenBLAS (`run_one_pool.sh`, `results/results_one_pool.jsonl`): one thread
+pool, as in the faiss wheels. The inertias are identical and the fits are ~2x
+faster. Fit time of cost-based over mass-based, median over the datasets and
+budgets (min to max):
+
+| k | one pool | two pools (first run) |
+| --- | --- | --- |
+| 64 | 1.27 (1.12 to 1.40) | 1.27 (1.10 to 1.37) |
+| 256 | 1.26 (1.05 to 1.66) | 1.32 (1.15 to 1.54) |
+| 1024 | 1.22 (0.93 to 1.37, and 4.2 on the road network with 10 epochs) | 1.41 (0.97 to 1.54, and 12) |
+| 4096 | 1.24 (0.96 to 1.27) | 1.50 (0.89 to 1.58) |
+
 ## Caveats
 
 - On GPU, the fit time of "PR cost, km||" includes our k-means|| called
@@ -116,6 +134,7 @@ benchlock --tag "revival comparison, GPU" all -- bash run_gpu.sh
 python analyze.py gpu > results/tables_gpu.md
 ```
 
-`pixi.toml` asks for the pthreads build of OpenBLAS: with the OpenMP one, the
+`pixi.toml` asks for the pthreads build of OpenBLAS (`run_one_pool.sh` needs
+the `*openmp*` one instead, and only runs the faiss variants): with the OpenMP one, the
 fits of the `EMeans` wheel are ~80x slower at k=1024
 ([#27](https://github.com/cakedev0/sklearn-contrib-emeans/issues/27)).

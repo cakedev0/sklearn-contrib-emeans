@@ -549,14 +549,19 @@ def test_revive_cheap_clusters_moves_cells():
 
 def test_emeans_two_level_cost_based_revival(monkeypatch):
     # Half of the initial centers are far from the data and get no samples.
-    X, _ = make_blobs(n_samples=5000, n_features=5, centers=40, random_state=0)
-    init = X[:40].copy()
-    init[20:] += 1000
-    params = dict(n_clusters=40, init=init, revival="cost-based", random_state=0)
+    # Overlapping blobs, as in test_emeans_two_level_close_to_exact.
+    rng = np.random.RandomState(0)
+    X = (
+        rng.normal(size=(20_000, 16))
+        + 2 * rng.normal(size=(30, 16))[rng.randint(30, size=20_000)]
+    )
+    init = X[:300].copy()
+    init[150:] += 1000
+    params = dict(n_clusters=300, init=init, revival="cost-based", random_state=0)
     emeans = _fit_two_level(X, monkeypatch, **params)
     exact = EMeans(**params).fit(X)
-    assert np.all(np.bincount(emeans.labels_, minlength=40) > 0)
-    assert emeans.inertia_ < 1.1 * exact.inertia_
+    assert np.all(np.bincount(emeans.labels_, minlength=300) > 0)
+    assert emeans.inertia_ < 1.01 * exact.inertia_
 
     with threadpool_limits(limits=1, user_api="openmp"):
         sequential = _fit_two_level(X, monkeypatch, **params)

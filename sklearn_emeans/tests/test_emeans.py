@@ -642,20 +642,24 @@ def test_emeans_cost_based_revival_does_not_depend_on_n_threads():
 @pytest.mark.parametrize(
     "n_samples, n_epochs, n_steps, n_calls",
     [
-        # A number of steps that is a multiple of 5: no revival after the last.
+        # Less than 2 epochs and a number of steps that is a multiple of 5: no
+        # revival after the last step.
         (3200, 1, 50, 9),
         (3200, 1.5, 75, 14),
-        (3200, 5, 65, 12),
-        # The other ones: a revival every 5 steps.
+        # Less than 2 epochs: a revival every 5 steps.
         (3000, 1.5, 71, 14),
-        (3000, 2, 48, 9),
+        # 2 epochs or more: no revival during the last epoch.
+        (3000, 2, 48, 4),
+        (3200, 5, 65, 10),
+        (3200, 2.5, 63, 7),
     ],
 )
-def test_emeans_cost_based_revival_not_after_last_step(
+def test_emeans_cost_based_revival_not_at_the_end(
     monkeypatch, n_samples, n_epochs, n_steps, n_calls
 ):
     # A cluster split after the last step would get no sample, and its two
-    # halves would end at the positions of the split.
+    # halves would end at the positions of the split. Split during the last
+    # epoch, they end at the mean of the few samples they get after the split.
     calls = []
 
     def revive(*args):

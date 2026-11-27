@@ -60,6 +60,12 @@ _DEAD_CLUSTER_THRESHOLD = 0.1
 # cost is below this fraction of the median over the clusters.
 _REMOVAL_COST_THRESHOLD = 0.3
 
+# revival="cost-based": from this number of epochs, there is no revival during
+# the last one. The two halves of a cluster split during the last epoch end at
+# the mean of the few rows they get after the split, which raises the final
+# inertia on heavy-tailed data. This differs from the reference implementation.
+_NO_LAST_REVIVAL_MIN_EPOCHS = 2
+
 # revival="cost-based": variance of a half-normal distribution, relative to the
 # normal one. A half of a split cluster keeps this fraction of the variance of
 # the cluster along its axis.
@@ -585,15 +591,18 @@ class EMeans(
         center instead. The steps estimate it, and they also follow the
         direction in which each cluster is the longest: the clusters that are
         split are the longest ones, and they are split along this direction.
-        A cluster split during the last epoch ends at the mean of the samples
-        it got after its last split. This revival also applies when
-        `n_features <= 2`. It is the default one of the reference
-        implementation since `pull request 5915 of faiss
+        With `n_epochs >= 2`, there is no revival during the last epoch, so
+        that all the final centers are the means of their samples of a whole
+        epoch. With `n_epochs < 2`, a cluster split during the last epoch
+        ends at the mean of the samples it got after its last split. This
+        revival also applies when `n_features <= 2`. It is the default one of
+        the reference implementation since `pull request 5915 of faiss
         <https://github.com/facebookresearch/faiss/pull/5915>`_, with three
         differences: the samples of the last epoch are not reassigned, there
-        is no revival after the last step, and the two halves of a split
-        cluster are not as long as the cluster was, so that they are not
-        split again right away. It is only supported
+        is no revival during the last epoch (after the last step, with
+        `n_epochs < 2`), and the two halves of a split cluster are not as
+        long as the cluster was, so that they are not split again right
+        away. It is only supported
         for NumPy arrays and sparse matrices. With `assignment='two-level'`,
         the second nearest center of a sample is the one of the centers it is
         compared to. For a sample that is compared to a single center, the
@@ -1013,6 +1022,7 @@ class EMeans(
                         for i in range(n_epoch_steps)
                     ]
                 )
+                epoch_revival_period = revival_period
                 if cost_based:
                     revive = partial(
                         _revive_cheap_clusters,
@@ -1025,7 +1035,9 @@ class EMeans(
                         epoch_counts if is_last_epoch else None,
                         cell_of_center,
                     )
-                    if is_last_epoch and n_steps % revival_period == 0:
+                    if is_last_epoch and self.n_epochs >= _NO_LAST_REVIVAL_MIN_EPOCHS:
+                        epoch_revival_period = 0
+                    elif is_last_epoch and n_steps % revival_period == 0:
                         # No revival after the last step: the two halves of
                         # a split would get no row, and end at the center of
                         # their cluster -/+ the offset of the split. This
@@ -1050,7 +1062,7 @@ class EMeans(
                         epoch_sums if is_last_epoch else None,
                         epoch_counts if is_last_epoch else None,
                         step + start,
-                        revival_period,
+                        epoch_revival_period,
                         revive,
                         n_threads,
                     )

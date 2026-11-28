@@ -47,7 +47,9 @@ an iteration of Lloyd's algorithm. Around this update:
 The batch size and the initial step size are not parameters. They are given by
 scaling laws that the authors of e-means fitted as functions of the number of
 samples, of clusters and of epochs. The batch size grows almost linearly with
-the number of samples, and is 8 times smaller for data with up to 16 features. It is stored in `batch_size_` after a fit.
+the number of samples, and is 8 times smaller for data with up to 16 features.
+With `assignment="two-level"` it is smaller on large data (see
+:ref:`many_clusters`). It is stored in `batch_size_` after a fit.
 
 Choosing `n_epochs`
 -------------------
@@ -142,6 +144,14 @@ fit: before each mini-batch, each cell center moves to the mean of its
 centers, and each center goes to the cell of its nearest cell center. A sample
 probes its nearest cell, and the cells that are at most 1.2 times as far from
 it, up to 16 cells. The pass that computes `labels_` does the same.
+
+The mini-batches are also smaller than with `"exact"` on large data: at most 2
+samples per cluster, or 50,000 samples if that is more, when the scaling law
+gives more. Updating the cells before each mini-batch takes a time that grows
+with the number of clusters and not with the mini-batch: with smaller
+mini-batches the fit spends its time there, and with the larger ones of the
+scaling law the centers are updated too rarely (60 times in 5 epochs for 100M
+samples and 100,000 clusters).
 
 Fit times on the first `n_samples` of DEEP 1B (96 features), with 5 epochs, on
 one socket of a Xeon 6787P server (MKL, 86 threads, one per core):

@@ -75,9 +75,12 @@ ones, plus the cells (`cells`, `cell_of_center`), which `fit` creates with
 `_init_cells` and which the kernels and the revivals update inplace, and the
 probing constants (`_TWO_LEVEL_*` in `_emeans.py`). A step first makes the
 cells follow the centers (`_refresh_cells`), then assigns the batch
-(`_search`). The pieces of work of each phase must not depend on the number of
-threads, since the rounding of a GEMM depends on its shape. The pure NumPy
-reference is in `tests/test_two_level.py`.
+(`_search`). Since the first costs the same whatever the batch, the batch
+size is also at most `max(_TWO_LEVEL_MIN_BATCH_SIZE,
+_TWO_LEVEL_BATCH_ROWS_PER_CLUSTER * n_clusters)` (`_resolve_batch_size`): this
+is not in the reference implementation. The pieces of work of each phase must
+not depend on the number of threads, since the rounding of a GEMM depends on
+its shape. The pure NumPy reference is in `tests/test_two_level.py`.
 
 `revival="cost-based"` (NumPy arrays and CSR matrices) is the removal-cost
 revival of faiss#5915. The exact and two-level kernels take three more arrays

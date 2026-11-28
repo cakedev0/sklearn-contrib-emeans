@@ -913,6 +913,19 @@ def test_scaling_laws():
     assert _resolve_initial_step_size(1_000_000, 1024, 5, 65536) == 1
 
 
+def test_two_level_batch_size():
+    # At most 2 rows per cluster, or 50,000 rows if that is more.
+    law = _resolve_batch_size(100_000_000, 100_000, 96, 5)
+    assert law == 8_388_608
+    assert _resolve_batch_size(100_000_000, 100_000, 96, 5, two_level=True) == 200_000
+    assert _resolve_batch_size(1_000_000, 10_000, 96, 5, two_level=True) == 50_000
+    # The batch of the law is an upper bound.
+    assert _resolve_batch_size(100_000, 1024, 96, 5) < 50_000
+    assert _resolve_batch_size(100_000, 1024, 96, 5, two_level=True) == (
+        _resolve_batch_size(100_000, 1024, 96, 5)
+    )
+
+
 def test_emeans_batch_size():
     X = np.random.RandomState(0).normal(size=(1000, 3))
     emeans = EMeans(n_clusters=5, random_state=0).fit(X)

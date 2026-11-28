@@ -87,6 +87,14 @@ _BATCH_LAWS = {
     "quality": (0.00439175, 0.134749, 0.876473, 0.813344),
 }
 
+# Two-level assignment: the batch size is also at most
+# max(_TWO_LEVEL_MIN_BATCH_SIZE, _TWO_LEVEL_BATCH_ROWS_PER_CLUSTER * n_clusters).
+# A step updates the cells whatever its batch, in a time that grows with the
+# number of clusters: with smaller batches, the steps of an epoch take longer
+# than its rows and the inertia is not lower.
+_TWO_LEVEL_MIN_BATCH_SIZE = 50_000
+_TWO_LEVEL_BATCH_ROWS_PER_CLUSTER = 2
+
 # Step law: step_size = c * n_clusters**a_k * batch_size**a_b * n_samples**a_n
 # * n_epochs**a_t, stored as (c, a_k, a_b, a_n, a_t).
 _STEP_LAW = (0.8244, -0.4617, 0.9003, -0.4498, -0.1057)
@@ -232,8 +240,12 @@ def _round_power_of_two(value):
     return low if value / low < 2 * low / value else 2 * low
 
 
-def _resolve_batch_size(n_samples, n_clusters, n_features, n_epochs):
-    """Batch size given by the fitted batch law."""
+def _resolve_batch_size(n_samples, n_clusters, n_features, n_epochs, two_level=False):
+    """Batch size given by the fitted batch law.
+
+    With the two-level assignment, the batch of the law is the upper bound of
+    a batch size that only depends on the number of clusters.
+    """
     if n_features <= _QUALITY_BATCH_MAX_FEATURES:
         law = "quality"
         max_batch_size = n_samples // 2
@@ -244,6 +256,14 @@ def _resolve_batch_size(n_samples, n_clusters, n_features, n_epochs):
     batch_size = _round_power_of_two(
         c * n_clusters**a_k * n_samples**a_n * n_epochs**a_t
     )
+    if two_level:
+        batch_size = min(
+            batch_size,
+            max(
+                _TWO_LEVEL_MIN_BATCH_SIZE,
+                _TWO_LEVEL_BATCH_ROWS_PER_CLUSTER * n_clusters,
+            ),
+        )
     return max(1, min(batch_size, max_batch_size, n_samples))
 
 
@@ -645,7 +665,8 @@ class EMeans(
     batch_size_ : int
         Size of the mini-batches, given by the scaling law of the authors. It
         grows almost linearly with the number of samples and is smaller when
-        `n_features <= 16`.
+        `n_features <= 16`. With `assignment='two-level'`, it is also at most
+        2 samples per cluster, or 50,000 samples if that is more.
 
     n_features_in_ : int
         Number of features seen during :term:`fit`.
@@ -685,8 +706,10 @@ class EMeans(
     far from it, up to 16 cells, and gets the nearest center of these cells.
     `labels_` and `inertia_` come from a last pass with the same assignment:
     `predict` and `score` give the exact ones, in
-    `O(n_samples * n_clusters)`. See :ref:`many_clusters` for what else to
-    know before using it.
+    `O(n_samples * n_clusters)`. The mini-batches are smaller than the ones
+    of the scaling law when it gives more than 2 samples per cluster and more
+    than 50,000 samples. See :ref:`many_clusters` for what else to know before
+    using it.
 
     For array API inputs, the Cython kernels are replaced by array operations
     of the library of the input. The random numbers are drawn on the host in
@@ -931,8 +954,11 @@ class EMeans(
             self._init_centers(X, random_state), dtype=X.dtype, order="C", copy=True
         )
 
+        two_level = (
+            self.assignment == "two-level" and n_clusters >= _TWO_LEVEL_MIN_CLUSTERS
+        )
         batch_size = _resolve_batch_size(
-            n_samples, n_clusters, n_features, self.n_epochs
+            n_samples, n_clusters, n_features, self.n_epochs, two_level=two_level
         )
         initial_step_size = _resolve_initial_step_size(
             n_samples, n_clusters, self.n_epochs, batch_size
@@ -949,9 +975,6 @@ class EMeans(
         epoch_sums = np.zeros((n_clusters, n_features), dtype=np.float64)
         epoch_counts = np.zeros(n_clusters, dtype=np.float64)
 
-        two_level = (
-            self.assignment == "two-level" and n_clusters >= _TWO_LEVEL_MIN_CLUSTERS
-        )
         if two_level:
             # The cells are updated inplace by the steps and the revivals.
             cells, cell_of_center = _init_cells(centers, random_state)

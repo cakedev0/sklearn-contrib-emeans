@@ -306,6 +306,21 @@ def _fit_two_level(X, monkeypatch, **params):
     return EMeans(assignment="two-level", **params).fit(X)
 
 
+def test_emeans_two_level_batch_size(monkeypatch):
+    X = np.random.RandomState(0).normal(size=(5000, 20)).astype(np.float32)
+    monkeypatch.setattr(_emeans, "_TWO_LEVEL_MIN_BATCH_SIZE", 8)
+    exact = EMeans(n_clusters=10, random_state=0).fit(X)
+    assert exact.batch_size_ > 20
+    two_level = _fit_two_level(X, monkeypatch, n_clusters=10, random_state=0)
+    assert two_level.batch_size_ == 20
+
+    # Below _TWO_LEVEL_MIN_CLUSTERS, the assignment and the batch size are the
+    # ones of "exact".
+    monkeypatch.setattr(_emeans, "_TWO_LEVEL_MIN_CLUSTERS", 1024)
+    emeans = EMeans(n_clusters=10, assignment="two-level", random_state=0).fit(X)
+    assert emeans.batch_size_ == exact.batch_size_
+
+
 def test_emeans_two_level_does_not_depend_on_n_threads(monkeypatch):
     X, _ = make_blobs(n_samples=5000, n_features=20, centers=30, random_state=0)
     with threadpool_limits(limits=1, user_api="openmp"):
